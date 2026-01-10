@@ -1,0 +1,2 @@
+#+title: duckdb-query
+

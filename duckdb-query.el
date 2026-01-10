@@ -1,0 +1,209 @@
+;;; duckdb-query.el --- Execute DuckDB queries with transducers -*- lexical-binding: t; -*-
+;;
+;; Author: Gino Cornejo
+;; Maintainer: Gino Cornejo <gggion123@gmail.com>
+;; Homepage: https://github.com/gggion/duckdb-query
+;; Keywords: data sql
+
+;; Package-Version: 0.1.0
+;; Package-Requires: ((emacs "28.1") (transducers "1.5.0"))
+
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;; This file is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published
+;; by the Free Software Foundation, either version 3 of the License,
+;; or (at your option) any later version.
+;;
+;; This file is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+;;
+;; You should have received a copy of the GNU General Public License
+;; along with this file.  If not, see <https://www.gnu.org/licenses/>.
+
+;;; Commentary:
+
+;; Execute SQL queries against DuckDB and process results with transducers.
+;;
+;; Basic usage:
+;;
+;;     (duckdb-query "SELECT 42 as answer, 'hello' as greeting")
+;;     ;; => ((("answer" . "42") ("greeting" . "hello")))
+;;
+;;     (duckdb-query "SELECT 42 as number" :transform-numbers t)
+;;     ;; => ((("number" . 42)))
+;;
+;; The package provides:
+;; - `duckdb-query' - Main query interface
+;; - `duckdb-query-execute-raw' - Low-level execution
+;; - `duckdb-query-parse-line-output' - Result parsing
+;; - `duckdb-query-parse-numbers' - Number conversion transducer
+
+;;; Code:
+
+(require 'transducers)
+(require 'cl-lib)
+
+;;; Customization
+
+(defgroup duckdb-query nil
+  "Execute DuckDB queries with transducers."
+  :group 'data
+  :prefix "duckdb-query-")
+
+(defcustom duckdb-query-executable "duckdb"
+  "Path to DuckDB executable.
+
+Used by `duckdb-query-execute-raw'."
+  :type 'string
+  :group 'duckdb-query)
+
+(defcustom duckdb-query-default-timeout 30
+  "Default timeout in seconds for query execution.
+
+Used by `duckdb-query-execute-raw' when TIMEOUT argument is nil."
+  :type 'integer
+  :group 'duckdb-query)
+
+;;; Core Functions
+
+(defun duckdb-query-execute-raw (query &optional database timeout)
+  "Execute QUERY via DuckDB CLI and return raw output string.
+
+QUERY is SQL string.
+DATABASE is optional path to database file; nil uses in-memory.
+TIMEOUT is seconds to wait; nil uses `duckdb-query-default-timeout'.
+
+Returns raw line-mode output string.
+Signals error on non-zero exit code.
+
+Called by `duckdb-query'.
+Uses `duckdb-query-executable' for subprocess invocation."
+  (let ((timeout (or timeout duckdb-query-default-timeout)))
+    (with-temp-buffer
+      (let* ((cmd (if database
+                      (list duckdb-query-executable database "-line" "-c" query)
+                    (list duckdb-query-executable "-line" "-c" query)))
+             (default-directory temporary-file-directory)
+             (process-environment (cons "DUCKDB_NO_COLOR=1" process-environment)))
+        (let ((exit-code (apply #'call-process (car cmd) nil t nil (cdr cmd))))
+          (if (zerop exit-code)
+              (buffer-string)
+            (error "DuckDB execution failed (exit %d): %s"
+                   exit-code (string-trim (buffer-string)))))))))
+
+(defun duckdb-query-parse-line-output (output-string)
+  "Parse DuckDB line-mode OUTPUT-STRING into list of alists.
+
+OUTPUT-STRING is raw output from `duckdb-query-execute-raw'.
+
+Returns list of alists where each alist represents one row.
+Returns nil for empty results.
+
+Called by `duckdb-query'."
+  (when (and output-string (not (string-empty-p output-string)))
+    (let ((rows nil)
+          (current-row nil))
+      (let ((normalized-output
+             (replace-regexp-in-string "\r\n\\|\r" "\n" (string-trim output-string))))
+        (unless (string-match-p "\\=[[:space:]]*\\'" normalized-output)
+          (let ((lines (split-string normalized-output "\n")))
+            (dolist (line lines)
+              (cond
+               ((or (string-empty-p line)
+                    (string-match-p "^[[:space:]]*$" line))
+                (when current-row
+                  (push (nreverse current-row) rows)
+                  (setq current-row nil)))
+               (t
+                (let ((eq-pos (string-search " = " line)))
+                  (when eq-pos
+                    (let ((col-name (string-trim (substring line 0 eq-pos)))
+                          (value (string-trim (substring line (+ eq-pos 3)))))
+                      (unless (string-empty-p col-name)
+                        (push (cons col-name value) current-row))))))))
+            (when current-row
+              (push (nreverse current-row) rows))))
+        (nreverse rows)))))
+
+(defun duckdb-query--maybe-number (val)
+  "Convert VAL to number if numeric, otherwise return unchanged.
+
+VAL is string or other value.
+
+Recognizes integers, decimals, scientific notation, and hexadecimal.
+
+Called by `duckdb-query-safe-convert-value'."
+  (if (stringp val)
+      (let ((trimmed (string-trim val)))
+        (cond
+         ((string-empty-p trimmed) val)
+         ((string-match-p "\\`[+-]?[0-9]+\\'" trimmed)
+          (string-to-number trimmed))
+         ((string-match-p "\\`[+-]?[0-9]*\\.[0-9]+\\'" trimmed)
+          (string-to-number trimmed))
+         ((string-match-p "\\`[+-]?[0-9]+\\(?:\\.[0-9]*\\)?[eE][+-]?[0-9]+\\'" trimmed)
+          (string-to-number trimmed))
+         ((string-match-p "\\`0[xX][0-9a-fA-F]+\\'" trimmed)
+          (string-to-number trimmed 16))
+         (t val)))
+    val))
+
+(defun duckdb-query-safe-convert-value (_col val)
+  "Safely convert VAL to number, returning original on error.
+
+_COL is column name (unused, for future extension).
+VAL is value to convert.
+
+Uses `duckdb-query--maybe-number' for conversion.
+Called by `duckdb-query-parse-numbers' transducer."
+  (condition-case nil
+      (duckdb-query--maybe-number val)
+    (error val)))
+
+(defun duckdb-query-parse-numbers ()
+  "Create transducer to convert numeric strings to numbers.
+
+Returns transducer that transforms each row by converting
+numeric-looking cell values to actual numbers.
+
+Uses `duckdb-query-safe-convert-value' for safe conversion.
+Used by `duckdb-query' when :transform-numbers is non-nil."
+  (transducers-map
+   (lambda (row)
+     (mapcar (lambda (cell)
+               (let ((col (car cell))
+                     (val (cdr cell)))
+                 (cons col (duckdb-query-safe-convert-value col val))))
+             row))))
+
+(cl-defun duckdb-query (query &key database timeout transform-numbers)
+  "Execute QUERY and return results as list of alists.
+
+QUERY is SQL string.
+DATABASE is optional database file path.
+TIMEOUT is optional timeout in seconds.
+TRANSFORM-NUMBERS when non-nil converts numeric strings to numbers.
+
+Returns list of alists where each alist represents one row.
+Returns nil for empty results.
+
+Uses `duckdb-query-execute-raw' for execution.
+Uses `duckdb-query-parse-line-output' for parsing.
+Uses `duckdb-query-parse-numbers' for number conversion."
+  (let* ((raw-output (duckdb-query-execute-raw query database timeout))
+         (parsed-rows (duckdb-query-parse-line-output raw-output)))
+    (if (null parsed-rows)
+        nil
+      (if transform-numbers
+          (transducers-transduce
+           (duckdb-query-parse-numbers)
+           #'transducers-cons
+           parsed-rows)
+        parsed-rows))))
+
+(provide 'duckdb-query)
+
+;;; duckdb-query.el ends here
