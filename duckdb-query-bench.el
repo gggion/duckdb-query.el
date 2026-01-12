@@ -2,45 +2,34 @@
 
 ;;; Commentary:
 
+;; Benchmark suite for duckdb-query package.
+;;
+;; Primary benchmarks:
+;; - `duckdb-query-bench-formats' - Compare output format performance
+;; - `duckdb-query-bench-columnar' - Measure columnar conversion
+;; - `duckdb-query-bench-query' - Ad-hoc query benchmarking
+;; - `duckdb-query-bench-runner' - Full benchmark harness
+
 ;;; Code:
+
 (require 'duckdb-query)
 
 ;;; Customization
 
 (defcustom duckdb-query-bench-test-file nil
-  "Path to parquet/database file for benchmarking.
+  "Path to parquet/CSV/database file for benchmarking.
+
 If nil, benchmarks use generated test data.
 
 Used by `duckdb-query-bench-runner' and `duckdb-query-bench-query'."
   :type '(choice (const :tag "Use generated data" nil)
-                 (file :tag "Parquet/database file"))
+                 (file :tag "Data file"))
   :group 'duckdb-query)
 
-(defcustom duckdb-query-bench-iterations-execution 3
-  "Iterations for execution benchmarks.
+(defcustom duckdb-query-bench-iterations 5
+  "Iterations for benchmark measurements.
 
-Used by `duckdb-query-bench-execution'."
-  :type 'integer
-  :group 'duckdb-query)
-
-(defcustom duckdb-query-bench-iterations-parsing 5
-  "Iterations for parsing benchmarks.
-
-Used by `duckdb-query-bench-parsing'."
-  :type 'integer
-  :group 'duckdb-query)
-
-(defcustom duckdb-query-bench-iterations-transform 5
-  "Iterations for transformation benchmarks.
-
-Used by `duckdb-query-bench-numbers'."
-  :type 'integer
-  :group 'duckdb-query)
-
-(defcustom duckdb-query-bench-iterations-e2e 3
-  "Iterations for end-to-end benchmarks.
-
-Used by `duckdb-query-bench-end-to-end'."
+Used by all benchmark functions."
   :type 'integer
   :group 'duckdb-query)
 
@@ -94,41 +83,65 @@ Shows mean time with unit, range, and iteration count."
 
 ;;; Core Benchmarks
 
-(defun duckdb-query-bench-execution (query)
-  "Benchmark raw execution of QUERY.
+(defun duckdb-query-bench-formats (query)
+  "Benchmark QUERY across all output formats.
 
-Measures `duckdb-query-execute-raw' without parsing.
-Uses `duckdb-query-bench-iterations-execution' iterations."
-  (duckdb-query-bench--measure duckdb-query-bench-iterations-execution
-    (lambda () (duckdb-query-execute-raw query))))
+Measures `:alist', `:plist', `:hash', `:vector', and `:columnar'.
 
-(defun duckdb-query-bench-parsing (output)
-  "Benchmark parsing of OUTPUT string.
+Returns alist of (FORMAT . STATS) pairs."
+  (let ((results nil))
+    (dolist (fmt '(:alist :plist :hash :vector :columnar))
+      (message "Benchmarking format %s..." fmt)
+      (let ((stats (duckdb-query-bench--measure
+                    duckdb-query-bench-iterations
+                    (lambda () (duckdb-query query :format fmt)))))
+        (message "  %s" (duckdb-query-bench--format-result
+                         (symbol-name fmt) stats))
+        (push (cons fmt stats) results)))
+    (nreverse results)))
 
-Measures `duckdb-query-parse-line-output' on pre-fetched data.
-Uses `duckdb-query-bench-iterations-parsing' iterations."
-  (duckdb-query-bench--measure duckdb-query-bench-iterations-parsing
-    (lambda () (duckdb-query-parse-line-output output))))
+(defun duckdb-query-bench-columnar (query)
+  "Benchmark columnar conversion overhead for QUERY.
 
-(defun duckdb-query-bench-numbers (rows)
-  "Benchmark number conversion on ROWS.
+Compares `:alist' format (baseline) to `:columnar' format.
 
-Measures `duckdb-query-parse-numbers' transducer.
-Uses `duckdb-query-bench-iterations-transform' iterations."
-  (duckdb-query-bench--measure duckdb-query-bench-iterations-transform
-    (lambda ()
-      (transducers-transduce
-       (duckdb-query-parse-numbers)
-       #'transducers-cons
-       rows))))
+Returns alist with entries:
+  (\"alist\" . STATS)
+  (\"columnar\" . STATS)
+  (\"columnar-overhead\" . OVERHEAD-SECONDS)"
+  (message "Benchmarking columnar conversion...")
 
-(defun duckdb-query-bench-end-to-end (query &optional transform-numbers)
+  (let ((alist-stats (duckdb-query-bench--measure
+                      duckdb-query-bench-iterations
+                      (lambda () (duckdb-query query :format :alist))))
+        (columnar-stats (duckdb-query-bench--measure
+                         duckdb-query-bench-iterations
+                         (lambda () (duckdb-query query :format :columnar)))))
+
+    (let ((overhead (- (plist-get columnar-stats :mean)
+                       (plist-get alist-stats :mean))))
+      (message "  Alist:    %s"
+               (duckdb-query-bench--format-result "alist" alist-stats))
+      (message "  Columnar: %s"
+               (duckdb-query-bench--format-result "columnar" columnar-stats))
+      (message "  Overhead: %s (%.1f%%)"
+               (duckdb-query-bench--format-time overhead)
+               (* 100 (/ overhead (plist-get alist-stats :mean))))
+
+      ;; Return alist, not plist
+      (list (cons "alist" alist-stats)
+            (cons "columnar" columnar-stats)
+            (cons "columnar-overhead" overhead)))))
+
+(defun duckdb-query-bench-end-to-end (query &optional format)
   "Benchmark complete execution of QUERY.
 
-Measures full `duckdb-query' pipeline.
-Uses `duckdb-query-bench-iterations-e2e' iterations."
-  (duckdb-query-bench--measure duckdb-query-bench-iterations-e2e
-    (lambda () (duckdb-query query :transform-numbers transform-numbers))))
+FORMAT defaults to `:alist'.
+
+Measures full `duckdb-query' pipeline including execution and parsing."
+  (duckdb-query-bench--measure
+   duckdb-query-bench-iterations
+   (lambda () (duckdb-query query :format (or format :alist)))))
 
 ;;; Test Data Generation
 
@@ -149,53 +162,45 @@ Used by `duckdb-query-bench-runner'."
 ;;; Ad-Hoc Query Benchmarking
 
 (defun duckdb-query-bench-query (query &optional label)
-  "Benchmark QUERY through all pipeline stages.
+  "Benchmark QUERY through all formats.
 
 QUERY is SQL string.
 LABEL is optional description.
 
-Returns alist of (STAGE . STATS) pairs."
+Returns alist of (FORMAT . STATS) pairs."
   (interactive "sSQL Query: \nsLabel (optional): ")
   (let* ((label (or label "Custom query"))
          (results nil))
 
     (message "=== Benchmarking: %s ===" label)
 
-    (let ((exec-stats (duckdb-query-bench-execution query)))
-      (message "  Execution: %s" (duckdb-query-bench--format-result "exec" exec-stats))
-      (push (cons 'execution exec-stats) results))
+    (setq results (duckdb-query-bench-formats query))
 
-    (let* ((output (duckdb-query-execute-raw query))
-           (parse-stats (duckdb-query-bench-parsing output)))
-      (message "  Parsing:   %s" (duckdb-query-bench--format-result "parse" parse-stats))
-      (push (cons 'parsing parse-stats) results))
-
-    (let* ((rows (duckdb-query-parse-line-output (duckdb-query-execute-raw query)))
-           (num-stats (duckdb-query-bench-numbers rows)))
-      (message "  Numbers:   %s" (duckdb-query-bench--format-result "nums" num-stats))
-      (push (cons 'numbers num-stats) results))
-
-    (let ((e2e-stats (duckdb-query-bench-end-to-end query t)))
-      (message "  End-to-end: %s" (duckdb-query-bench--format-result "e2e" e2e-stats))
-      (push (cons 'end-to-end e2e-stats) results))
+    (message "\n=== Columnar Conversion Analysis ===")
+    (duckdb-query-bench-columnar query)
 
     (message "")
-    (nreverse results)))
+    results))
 
 ;;; Benchmark Runner
 
 (defun duckdb-query-bench-runner (&optional test-file)
   "Run complete benchmark harness, return results alist.
 
-TEST-FILE overrides `duckdb-query-bench-test-file'.
+TEST-FILE is path to data file (CSV, Parquet, database).
+If nil, uses `duckdb-query-bench-test-file' or generates test data.
 
-For ad-hoc queries, use `duckdb-query-bench-query'."
+Benchmarks queries at 1K, 10K, and 50K row sizes.
+
+For ad-hoc query benchmarking, use `duckdb-query-bench-query'."
+  (interactive)
   (let* ((test-file (or test-file duckdb-query-bench-test-file))
          (queries (duckdb-query-bench--generate-queries test-file))
          (results nil))
 
     (message "=== DUCKDB-QUERY BENCHMARK HARNESS ===")
-    (message "Test file: %s\n" (or test-file "generated data"))
+    (message "Test file: %s" (or test-file "generated data"))
+    (message "Iterations: %d\n" duckdb-query-bench-iterations)
 
     (dolist (test queries)
       (let* ((size (car test))
@@ -204,23 +209,20 @@ For ad-hoc queries, use `duckdb-query-bench-query'."
 
         (message "Testing %s..." label)
 
-        (let ((exec-stats (duckdb-query-bench-execution query)))
-          (message "  Execution: %s" (duckdb-query-bench--format-result "exec" exec-stats))
-          (push (cons (format "%s-execution" label) exec-stats) results))
+        ;; Benchmark all formats
+        (let ((format-results (duckdb-query-bench-formats query)))
+          (dolist (result format-results)
+            (push (cons (format "%s-%s" label (car result))
+                        (cdr result))
+                  results)))
 
-        (let* ((output (duckdb-query-execute-raw query))
-               (parse-stats (duckdb-query-bench-parsing output)))
-          (message "  Parsing:   %s" (duckdb-query-bench--format-result "parse" parse-stats))
-          (push (cons (format "%s-parsing" label) parse-stats) results))
-
-        (let* ((rows (duckdb-query-parse-line-output (duckdb-query-execute-raw query)))
-               (num-stats (duckdb-query-bench-numbers rows)))
-          (message "  Numbers:   %s" (duckdb-query-bench--format-result "nums" num-stats))
-          (push (cons (format "%s-numbers" label) num-stats) results))
-
-        (let ((e2e-stats (duckdb-query-bench-end-to-end query t)))
-          (message "  End-to-end: %s" (duckdb-query-bench--format-result "e2e" e2e-stats))
-          (push (cons (format "%s-end-to-end" label) e2e-stats) results))
+        ;; Analyze columnar overhead
+        (message "\nColumnar analysis for %s:" label)
+        (let ((columnar-analysis (duckdb-query-bench-columnar query)))
+          ;; Extract overhead value from alist
+          (push (cons (format "%s-columnar-overhead" label)
+                      (cdr (assoc "columnar-overhead" columnar-analysis)))
+                results))
 
         (message "")))
 
@@ -236,9 +238,14 @@ Both arguments are alists from `duckdb-query-bench-runner'."
   (message "\n=== PERFORMANCE COMPARISON ===\n")
   (dolist (baseline baseline-results)
     (let* ((label (car baseline))
-           (baseline-mean (plist-get (cdr baseline) :mean))
+           (baseline-mean (if (numberp (cdr baseline))
+                              (cdr baseline)
+                            (plist-get (cdr baseline) :mean)))
            (new (assoc label new-results))
-           (new-mean (when new (plist-get (cdr new) :mean))))
+           (new-mean (when new
+                       (if (numberp (cdr new))
+                           (cdr new)
+                         (plist-get (cdr new) :mean)))))
       (when new-mean
         (let ((speedup (/ baseline-mean new-mean)))
           (message "%s: %.2fx %s"
@@ -265,27 +272,44 @@ Returns alist for `duckdb-query-bench-compare'."
     (read (current-buffer))))
 
 (defun duckdb-query-bench-tabulate (results)
-  "Display RESULTS in tabular format.
+  "Format RESULTS as aligned org-mode table string.
 
-RESULTS is alist from `duckdb-query-bench-runner' or `duckdb-query-bench-query'."
-  (let ((buf (get-buffer-create "*DuckDB Benchmark Results*")))
-    (with-current-buffer buf
-      (erase-buffer)
-      (insert (format "%-20s %12s %12s %12s %5s\n"
-                      "Stage" "Mean" "Min" "Max" "N"))
-      (insert (make-string 65 ?-) "\n")
-      (dolist (result results)
-        (let ((label (car result))
-              (stats (cdr result)))
-          (insert (format "%-20s %12s %12s %12s %5d\n"
+RESULTS is alist from `duckdb-query-bench-runner' or
+`duckdb-query-bench-query'.
+
+Returns string containing org-table with columns:
+| Benchmark | Mean | Min | Max | N |
+
+For overhead entries (numeric values), displays only benchmark name
+and time value."
+  (require 'org-table)
+  (with-temp-buffer
+    (org-mode)
+    ;; Insert header
+    (insert "| Benchmark | Mean | Min | Max | N |\n")
+    (insert "|-\n")
+
+    ;; Insert data rows
+    (dolist (result results)
+      (let ((label (car result))
+            (stats (cdr result)))
+        (if (numberp stats)
+            ;; Overhead value - span across columns
+            (insert (format "| %s | %s | | | |\n"
+                            label
+                            (duckdb-query-bench--format-time stats)))
+          ;; Full stats
+          (insert (format "| %s | %s | %s | %s | %d |\n"
                           label
                           (duckdb-query-bench--format-time (plist-get stats :mean))
                           (duckdb-query-bench--format-time (plist-get stats :min))
                           (duckdb-query-bench--format-time (plist-get stats :max))
-                          (plist-get stats :iterations)))))
-      (goto-char (point-min))
-      (view-mode))
-    (display-buffer buf)))
+                          (plist-get stats :iterations))))))
+
+    ;; Align table
+    (goto-char (point-min))
+    (org-table-align)
+    (buffer-string)))
 
 (provide 'duckdb-query-bench)
 ;;; duckdb-query-bench.el ends here
