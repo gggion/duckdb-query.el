@@ -196,30 +196,53 @@ Used by `duckdb-query' when :transform-numbers is non-nil."
                  (cons col (duckdb-query-safe-convert-value col val))))
              row))))
 
-(cl-defun duckdb-query (query &key database timeout transform-numbers)
-  "Execute QUERY and return results as list of alists.
+(cl-defun duckdb-query (query &key database timeout (format :alist))
+  "Execute QUERY and return results in FORMAT.
 
 QUERY is SQL string.
 DATABASE is optional database file path.
 TIMEOUT is optional timeout in seconds.
-TRANSFORM-NUMBERS when non-nil converts numeric strings to numbers.
+FORMAT is output structure, one of:
+  :alist  - list of alists (default)
+  :plist  - list of plists
+  :hash   - list of hash-tables
+  :vector - vector of alists
 
-Returns list of alists where each alist represents one row.
 Returns nil for empty results.
 
 Uses `duckdb-query-execute-raw' for execution.
-Uses `duckdb-query-parse-line-output' for parsing.
-Uses `duckdb-query-parse-numbers' for number conversion."
-  (let* ((raw-output (duckdb-query-execute-raw query database timeout))
-         (parsed-rows (duckdb-query-parse-line-output raw-output)))
-    (if (null parsed-rows)
-        nil
-      (if transform-numbers
-          (transducers-transduce
-           (duckdb-query-parse-numbers)
-           #'transducers-cons
-           parsed-rows)
-        parsed-rows))))
+Uses `json-parse-string' for C-level parsing.
+Uses `duckdb-query-null-value' and `duckdb-query-false-value'
+for null/false representation."
+  (let ((json-output (duckdb-query-execute-raw query database timeout)))
+    (when (and json-output (not (string-empty-p (string-trim json-output))))
+      (pcase format
+        (:alist
+         (json-parse-string json-output
+                            :object-type 'alist
+                            :array-type 'list
+                            :null-object duckdb-query-null-value
+                            :false-object duckdb-query-false-value))
+        (:plist
+         (json-parse-string json-output
+                            :object-type 'plist
+                            :array-type 'list
+                            :null-object duckdb-query-null-value
+                            :false-object duckdb-query-false-value))
+        (:hash
+         (json-parse-string json-output
+                            :object-type 'hash-table
+                            :array-type 'list
+                            :null-object duckdb-query-null-value
+                            :false-object duckdb-query-false-value))
+        (:vector
+         (json-parse-string json-output
+                            :object-type 'alist
+                            :array-type 'array
+                            :null-object duckdb-query-null-value
+                            :false-object duckdb-query-false-value))
+        (_
+         (error "Unknown format: %s.  Valid: :alist :plist :hash :vector" format))))))
 
 (provide 'duckdb-query)
 
