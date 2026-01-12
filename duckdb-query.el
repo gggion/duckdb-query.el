@@ -1,4 +1,4 @@
-;;; duckdb-query.el --- Execute DuckDB queries with transducers -*- lexical-binding: t; -*-
+;;; duckdb-query.el --- DuckDB query results as native Elisp data structures -*- lexical-binding: t; -*-
 ;;
 ;; Author: Gino Cornejo
 ;; Maintainer: Gino Cornejo <gggion123@gmail.com>
@@ -25,21 +25,38 @@
 
 ;;; Commentary:
 
-;; Execute SQL queries against DuckDB and process results with transducers.
+;; Convert DuckDB query results into native Emacs Lisp data structures.
+;;
+;; This package bridges DuckDB's analytical capabilities with Emacs Lisp's
+;; data manipulation facilities by executing SQL queries and returning
+;; results as idiomatic Elisp structures.
 ;;
 ;; Basic usage:
 ;;
 ;;     (duckdb-query "SELECT 42 as answer, 'hello' as greeting")
-;;     ;; => ((("answer" . "42") ("greeting" . "hello")))
+;;     ;; => ((("answer" . 42) ("greeting" . "hello")))
 ;;
-;;     (duckdb-query "SELECT 42 as number" :transform-numbers t)
-;;     ;; => ((("number" . 42)))
+;;     (duckdb-query "SELECT * FROM 'data.csv'" :format :columnar)
+;;     ;; => (("id" . [1 2 3]) ("name" . ["Alice" "Bob" "Carol"]))
 ;;
 ;; The package provides:
-;; - `duckdb-query' - Main query interface
-;; - `duckdb-query-execute-raw' - Low-level execution
-;; - `duckdb-query-parse-line-output' - Result parsing
-;; - `duckdb-query-parse-numbers' - Number conversion transducer
+;; - `duckdb-query' - Execute queries and return Elisp data structures
+;; - `duckdb-query-execute-raw' - Low-level CLI execution
+;;
+;; Supported output formats:
+;; - :alist (default) - List of association lists (row-oriented)
+;; - :plist - List of property lists (row-oriented)
+;; - :hash - List of hash tables (row-oriented)
+;; - :vector - Vector of association lists (row-oriented)
+;; - :columnar - Association list of vectors (column-oriented)
+;; - :org-table - List of lists for org-mode tables
+;;
+;; Each format is optimized for different use cases:
+;; - Row-oriented formats for record processing
+;; - Columnar format for analytical operations
+;; - Org-table format for display and export
+;;
+;; For performance benchmarking, see duckdb-query-bench.el.
 
 ;;; Code:
 
