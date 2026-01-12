@@ -123,39 +123,30 @@ to minimize cache misses.
 Called by `duckdb-query' when FORMAT is `:columnar'."
   (when rows
     (let* ((row-count (length rows))
-           (first-row (car rows))
-           (columns (mapcar #'car first-row))
+           (columns (mapcar #'car (car rows)))
            (col-count (length columns))
-           ;; Build column name -> index hash table
-           (col-index (let ((ht (make-hash-table :test 'equal :size col-count))
-                            (idx 0))
-                        (dolist (col columns)
-                          (puthash col idx ht)
-                          (setq idx (1+ idx)))
-                        ht))
-           ;; Pre-allocate all column vectors
+           (col-index (cl-loop with ht = (make-hash-table :test 'equal :size col-count)
+                               for col in columns
+                               for idx from 0
+                               do (puthash col idx ht)
+                               finally return ht))
            (col-vectors (make-vector col-count nil)))
 
       ;; Initialize column vectors
       (dotimes (i col-count)
         (aset col-vectors i (make-vector row-count nil)))
 
-      ;; Single pass: fill all columns row-by-row
-      (let ((row-idx 0))
-        (dolist (row rows)
-          (dolist (cell row)
-            (let ((col-idx (gethash (car cell) col-index)))
-              (when col-idx
-                (aset (aref col-vectors col-idx) row-idx (cdr cell)))))
-          (setq row-idx (1+ row-idx))))
+      ;; Fill vectors in single pass
+      (cl-loop for row in rows
+               for row-idx from 0
+               do (dolist (cell row)
+                    (when-let ((col-idx (gethash (car cell) col-index)))
+                      (aset (aref col-vectors col-idx) row-idx (cdr cell)))))
 
       ;; Build result alist
-      (let ((result nil)
-            (col-idx 0))
-        (dolist (col columns)
-          (push (cons col (aref col-vectors col-idx)) result)
-          (setq col-idx (1+ col-idx)))
-        (nreverse result)))))
+      (cl-loop for col in columns
+               for col-idx from 0
+               collect (cons col (aref col-vectors col-idx))))))
 
 (defun duckdb-query--to-org-table (rows)
   "Convert ROWS to org-table format.
