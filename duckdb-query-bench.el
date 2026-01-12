@@ -133,6 +133,173 @@ Returns alist with entries:
             (cons "columnar" columnar-stats)
             (cons "columnar-overhead" overhead)))))
 
+(defun duckdb-query-bench-columnar-detailed (query)
+  "Benchmark columnar conversion with detailed timing breakdown.
+
+Measures four phases:
+1. DuckDB query execution (raw JSON output)
+2. JSON parsing to alist
+3. Alist to columnar conversion
+4. Total end-to-end time
+
+Returns alist with entries for :alist and :columnar formats,
+each containing timing breakdown."
+  (message "=== Detailed Columnar Benchmark ===\n")
+
+  (let ((results nil))
+
+    ;; Benchmark alist format
+    (message "Benchmarking :alist format...")
+    (let ((exec-stats nil)
+          (parse-stats nil)
+          (total-stats nil)
+          (json-output nil))
+
+      ;; Phase 1: Query execution (get raw JSON)
+      (setq exec-stats
+            (duckdb-query-bench--measure
+             duckdb-query-bench-iterations
+             (lambda ()
+               (setq json-output (duckdb-query-execute-raw query)))))
+      (message "  Query execution: %s"
+               (duckdb-query-bench--format-result "exec" exec-stats))
+
+      ;; Phase 2: JSON parsing
+      (setq parse-stats
+            (duckdb-query-bench--measure
+             duckdb-query-bench-iterations
+             (lambda ()
+               (json-parse-string json-output
+                                  :object-type 'alist
+                                  :array-type 'list
+                                  :null-object duckdb-query-null-value
+                                  :false-object duckdb-query-false-value))))
+      (message "  JSON parsing: %s"
+               (duckdb-query-bench--format-result "parse" parse-stats))
+
+      ;; Phase 3: Total end-to-end
+      (setq total-stats
+            (duckdb-query-bench--measure
+             duckdb-query-bench-iterations
+             (lambda ()
+               (duckdb-query query :format :alist))))
+      (message "  Total: %s\n"
+               (duckdb-query-bench--format-result "total" total-stats))
+
+      (push (cons "alist"
+                  (list (cons "query-exec" (plist-get exec-stats :mean))
+                        (cons "parsing" (plist-get parse-stats :mean))
+                        (cons "conversion" 0)  ; No conversion for alist
+                        (cons "total" (plist-get total-stats :mean))))
+            results))
+
+    ;; Benchmark columnar format
+    (message "Benchmarking :columnar format...")
+    (let ((exec-stats nil)
+          (parse-stats nil)
+          (conversion-stats nil)
+          (total-stats nil)
+          (json-output nil)
+          (parsed-rows nil))
+
+      ;; Phase 1: Query execution (get raw JSON)
+      (setq exec-stats
+            (duckdb-query-bench--measure
+             duckdb-query-bench-iterations
+             (lambda ()
+               (setq json-output (duckdb-query-execute-raw query)))))
+      (message "  Query execution: %s"
+               (duckdb-query-bench--format-result "exec" exec-stats))
+
+      ;; Phase 2: JSON parsing
+      (setq parse-stats
+            (duckdb-query-bench--measure
+             duckdb-query-bench-iterations
+             (lambda ()
+               (setq parsed-rows
+                     (json-parse-string json-output
+                                        :object-type 'alist
+                                        :array-type 'list
+                                        :null-object duckdb-query-null-value
+                                        :false-object duckdb-query-false-value)))))
+      (message "  JSON parsing: %s"
+               (duckdb-query-bench--format-result "parse" parse-stats))
+
+      ;; Phase 3: Columnar conversion
+      (setq conversion-stats
+            (duckdb-query-bench--measure
+             duckdb-query-bench-iterations
+             (lambda ()
+               (duckdb-query--to-columnar parsed-rows))))
+      (message "  Columnar conversion: %s"
+               (duckdb-query-bench--format-result "conversion" conversion-stats))
+
+      ;; Phase 4: Total end-to-end
+      (setq total-stats
+            (duckdb-query-bench--measure
+             duckdb-query-bench-iterations
+             (lambda ()
+               (duckdb-query query :format :columnar))))
+      (message "  Total: %s\n"
+               (duckdb-query-bench--format-result "total" total-stats))
+
+      (push (cons "columnar"
+                  (list (cons "query-exec" (plist-get exec-stats :mean))
+                        (cons "parsing" (plist-get parse-stats :mean))
+                        (cons "conversion" (plist-get conversion-stats :mean))
+                        (cons "total" (plist-get total-stats :mean))))
+            results))
+
+    (message "=== Benchmark Complete ===")
+    (nreverse results)))
+
+(defun duckdb-query-bench-columnar-detailed-table (results)
+  "Format RESULTS from `duckdb-query-bench-columnar-detailed' as org table.
+
+RESULTS is alist with entries for \"alist\" and \"columnar\".
+
+Returns formatted org-table string."
+  (require 'org-table)
+  (with-temp-buffer
+    (org-mode)
+
+    ;; Insert header
+    (insert "| Benchmark | query-exec | parsing | conversion | total |\n")
+    (insert "|-\n")
+
+    ;; Insert data rows
+    (dolist (result results)
+      (let* ((format-name (car result))
+             (timings (cdr result))
+             (query-exec (cdr (assoc "query-exec" timings)))
+             (parsing (cdr (assoc "parsing" timings)))
+             (conversion (cdr (assoc "conversion" timings)))
+             (total (cdr (assoc "total" timings))))
+        (insert (format "| %s | %s | %s | %s | %s |\n"
+                        format-name
+                        (duckdb-query-bench--format-time query-exec)
+                        (duckdb-query-bench--format-time parsing)
+                        (if (zerop conversion)
+                            "—"
+                          (duckdb-query-bench--format-time conversion))
+                        (duckdb-query-bench--format-time total)))))
+
+    ;; Add overhead row
+    (let* ((alist-timings (cdr (assoc "alist" results)))
+           (columnar-timings (cdr (assoc "columnar" results)))
+           (conversion-overhead (cdr (assoc "conversion" columnar-timings)))
+           (total-overhead (- (cdr (assoc "total" columnar-timings))
+                              (cdr (assoc "total" alist-timings)))))
+      (insert "|-\n")
+      (insert (format "| overhead | — | — | %s | %s |\n"
+                      (duckdb-query-bench--format-time conversion-overhead)
+                      (duckdb-query-bench--format-time total-overhead))))
+
+    ;; Align table
+    (goto-char (point-min))
+    (org-table-align)
+    (buffer-string)))
+
 (defun duckdb-query-bench-end-to-end (query &optional format)
   "Benchmark complete execution of QUERY.
 
