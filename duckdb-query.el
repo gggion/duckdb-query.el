@@ -2,7 +2,7 @@
 ;;
 ;; Author: Gino Cornejo
 ;; Maintainer: Gino Cornejo <gggion123@gmail.com>
-;; Homepage: https://github.com/gggion/duckdb-query
+;; Homepage: https://github.com/gggion/duckdb-query.el
 ;; Keywords: data sql
 
 ;; Package-Version: 0.1.0
@@ -171,22 +171,27 @@ Called by `duckdb-query' when FORMAT is `:columnar'."
 ROWS is list of alists from JSON parsing.
 
 Returns list of lists: first row is headers, remaining rows are values.
-Each row is a list of column values in consistent order.
+Each row is a list of column values in consistent order, with native
+Lisp types (numbers, strings, symbols).
+
+Uses hash table for O(1) column lookup and minimizes allocations.
 
 Called by `duckdb-query' when FORMAT is `:org-table'."
   (when rows
-    (let* ((first-row (car rows))
-           (headers (mapcar #'car first-row)))
+    (let* ((headers (mapcar #'car (car rows)))
+           (col-count (length headers))
+           (col-index (cl-loop with ht = (make-hash-table :test 'equal :size col-count)
+                               for col in headers
+                               for idx from 0
+                               do (puthash col idx ht)
+                               finally return ht)))
       (cons headers
-            (mapcar (lambda (row)
-                      (mapcar (lambda (col)
-                                (let ((val (cdr (assoc col row))))
-                                  ;; Convert to string for org-table
-                                  (if (stringp val)
-                                      val
-                                    (prin1-to-string val))))
-                              headers))
-                    rows)))))
+            (cl-loop for row in rows
+                     collect (let ((row-vec (make-vector col-count nil)))
+                               (dolist (cell row)
+                                 (when-let ((idx (gethash (car cell) col-index)))
+                                   (aset row-vec idx (cdr cell))))
+                               (append row-vec nil)))))))
 
 (cl-defun duckdb-query (query &key database timeout (format :alist))
   "Execute QUERY and return results in FORMAT.
