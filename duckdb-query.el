@@ -183,7 +183,7 @@ FORMAT is output structure, one of:
   :hash      - list of hash-tables
   :vector    - vector of alists
   :columnar  - alist of column vectors
-  :org-table - list of lists for org-mode tables
+  :org-table - list of lists for `org-mode' tables
 
 Returns nil for empty results.
 
