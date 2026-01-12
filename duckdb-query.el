@@ -70,13 +70,13 @@ Used by `duckdb-query-execute-raw' when TIMEOUT argument is nil."
 ;;; Core Functions
 
 (defun duckdb-query-execute-raw (query &optional database timeout)
-  "Execute QUERY via DuckDB CLI and return raw output string.
+  "Execute QUERY via DuckDB CLI and return raw JSON string.
 
 QUERY is SQL string.
 DATABASE is optional path to database file; nil uses in-memory.
 TIMEOUT is seconds to wait; nil uses `duckdb-query-default-timeout'.
 
-Returns raw line-mode output string.
+Returns raw JSON output string for parsing.
 Signals error on non-zero exit code.
 
 Called by `duckdb-query'.
@@ -84,8 +84,8 @@ Uses `duckdb-query-executable' for subprocess invocation."
   (let ((timeout (or timeout duckdb-query-default-timeout)))
     (with-temp-buffer
       (let* ((cmd (if database
-                      (list duckdb-query-executable database "-line" "-c" query)
-                    (list duckdb-query-executable "-line" "-c" query)))
+                      (list duckdb-query-executable database "-json" "-c" query)
+                    (list duckdb-query-executable "-json" "-c" query)))
              (default-directory temporary-file-directory)
              (process-environment (cons "DUCKDB_NO_COLOR=1" process-environment)))
         (let ((exit-code (apply #'call-process (car cmd) nil t nil (cdr cmd))))
