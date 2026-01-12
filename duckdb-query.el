@@ -126,6 +126,29 @@ Called by `duckdb-query' when FORMAT is `:columnar'."
                                            rows))))
               columns))))
 
+(defun duckdb-query--to-org-table (rows)
+  "Convert ROWS to org-table format.
+
+ROWS is list of alists from JSON parsing.
+
+Returns list of lists: first row is headers, remaining rows are values.
+Each row is a list of column values in consistent order.
+
+Called by `duckdb-query' when FORMAT is `:org-table'."
+  (when rows
+    (let* ((first-row (car rows))
+           (headers (mapcar #'car first-row)))
+      (cons headers
+            (mapcar (lambda (row)
+                      (mapcar (lambda (col)
+                                (let ((val (cdr (assoc col row))))
+                                  ;; Convert to string for org-table
+                                  (if (stringp val)
+                                      val
+                                    (prin1-to-string val))))
+                              headers))
+                    rows)))))
+
 (cl-defun duckdb-query (query &key database timeout (format :alist))
   "Execute QUERY and return results in FORMAT.
 
@@ -133,11 +156,12 @@ QUERY is SQL string.
 DATABASE is optional database file path.
 TIMEOUT is reserved for future timeout implementation; currently ignored.
 FORMAT is output structure, one of:
-  :alist    - list of alists (default)
-  :plist    - list of plists
-  :hash     - list of hash-tables
-  :vector   - vector of alists
-  :columnar - alist of column vectors
+  :alist     - list of alists (default)
+  :plist     - list of plists
+  :hash      - list of hash-tables
+  :vector    - vector of alists
+  :columnar  - alist of column vectors
+  :org-table - list of lists for org-mode tables
 
 Returns nil for empty results.
 
@@ -145,7 +169,8 @@ Uses `duckdb-query-execute-raw' for execution.
 Uses `json-parse-string' for C-level parsing.
 Uses `duckdb-query-null-value' and `duckdb-query-false-value'
 for null/false representation.
-Uses `duckdb-query--to-columnar' for columnar conversion."
+Uses `duckdb-query--to-columnar' for columnar conversion.
+Uses `duckdb-query--to-org-table' for org-table conversion."
   (let ((json-output (duckdb-query-execute-raw query database timeout)))
     (when (and json-output (not (string-empty-p (string-trim json-output))))
       (pcase format
@@ -180,8 +205,15 @@ Uses `duckdb-query--to-columnar' for columnar conversion."
                              :array-type 'list
                              :null-object duckdb-query-null-value
                              :false-object duckdb-query-false-value)))
+        (:org-table
+         (duckdb-query--to-org-table
+          (json-parse-string json-output
+                             :object-type 'alist
+                             :array-type 'list
+                             :null-object duckdb-query-null-value
+                             :false-object duckdb-query-false-value)))
         (_
-         (error "Unknown format: %s.  Valid: :alist :plist :hash :vector :columnar" format))))))
+         (error "Unknown format: %s.  Valid: :alist :plist :hash :vector :columnar :org-table" format))))))
 
 (provide 'duckdb-query)
 
