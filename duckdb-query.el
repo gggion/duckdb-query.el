@@ -6,7 +6,7 @@
 ;; Keywords: data sql
 
 ;; Package-Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (transducers "1.5.0"))
+;; Package-Requires: ((emacs "28.1"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -43,7 +43,6 @@
 
 ;;; Code:
 
-(require 'transducers)
 (require 'cl-lib)
 
 ;;; Customization
@@ -86,49 +85,67 @@ Used by `duckdb-query' when parsing JSON output from DuckDB."
 
 ;;; Core Functions
 
-(defun duckdb-query-execute-raw (query &optional database timeout)
+(defun duckdb-query-execute-raw (query &optional database _timeout)
   "Execute QUERY via DuckDB CLI and return raw JSON string.
 
 QUERY is SQL string.
 DATABASE is optional path to database file; nil uses in-memory.
-TIMEOUT is seconds to wait; nil uses `duckdb-query-default-timeout'.
+_TIMEOUT is reserved for future use; currently ignored.
 
 Returns raw JSON output string for parsing.
 Signals error on non-zero exit code.
 
 Called by `duckdb-query'.
 Uses `duckdb-query-executable' for subprocess invocation."
-  (let ((timeout (or timeout duckdb-query-default-timeout)))
-    (with-temp-buffer
-      (let* ((cmd (if database
-                      (list duckdb-query-executable database "-json" "-c" query)
-                    (list duckdb-query-executable "-json" "-c" query)))
-             (default-directory temporary-file-directory)
-             (process-environment (cons "DUCKDB_NO_COLOR=1" process-environment)))
-        (let ((exit-code (apply #'call-process (car cmd) nil t nil (cdr cmd))))
-          (if (zerop exit-code)
-              (buffer-string)
-            (error "DuckDB execution failed (exit %d): %s"
-                   exit-code (string-trim (buffer-string)))))))))
+  (with-temp-buffer
+    (let* ((cmd (if database
+                    (list duckdb-query-executable database "-json" "-c" query)
+                  (list duckdb-query-executable "-json" "-c" query)))
+           (default-directory temporary-file-directory)
+           (process-environment (cons "DUCKDB_NO_COLOR=1" process-environment)))
+      (let ((exit-code (apply #'call-process (car cmd) nil t nil (cdr cmd))))
+        (if (zerop exit-code)
+            (buffer-string)
+          (error "DuckDB execution failed (exit %d): %s"
+                 exit-code (string-trim (buffer-string))))))))
+
+(defun duckdb-query--to-columnar (rows)
+  "Convert ROWS to columnar format.
+
+ROWS is list of alists from JSON parsing.
+
+Returns alist of (COLUMN-NAME . VECTOR) pairs where each vector
+contains all values for that column.
+
+Called by `duckdb-query' when FORMAT is `:columnar'."
+  (when rows
+    (let ((columns (mapcar #'car (car rows))))
+      (mapcar (lambda (col)
+                (cons col (vconcat (mapcar (lambda (row)
+                                             (cdr (assoc col row)))
+                                           rows))))
+              columns))))
 
 (cl-defun duckdb-query (query &key database timeout (format :alist))
   "Execute QUERY and return results in FORMAT.
 
 QUERY is SQL string.
 DATABASE is optional database file path.
-TIMEOUT is optional timeout in seconds.
+TIMEOUT is reserved for future timeout implementation; currently ignored.
 FORMAT is output structure, one of:
-  :alist  - list of alists (default)
-  :plist  - list of plists
-  :hash   - list of hash-tables
-  :vector - vector of alists
+  :alist    - list of alists (default)
+  :plist    - list of plists
+  :hash     - list of hash-tables
+  :vector   - vector of alists
+  :columnar - alist of column vectors
 
 Returns nil for empty results.
 
 Uses `duckdb-query-execute-raw' for execution.
 Uses `json-parse-string' for C-level parsing.
 Uses `duckdb-query-null-value' and `duckdb-query-false-value'
-for null/false representation."
+for null/false representation.
+Uses `duckdb-query--to-columnar' for columnar conversion."
   (let ((json-output (duckdb-query-execute-raw query database timeout)))
     (when (and json-output (not (string-empty-p (string-trim json-output))))
       (pcase format
@@ -156,8 +173,15 @@ for null/false representation."
                             :array-type 'array
                             :null-object duckdb-query-null-value
                             :false-object duckdb-query-false-value))
+        (:columnar
+         (duckdb-query--to-columnar
+          (json-parse-string json-output
+                             :object-type 'alist
+                             :array-type 'list
+                             :null-object duckdb-query-null-value
+                             :false-object duckdb-query-false-value)))
         (_
-         (error "Unknown format: %s.  Valid: :alist :plist :hash :vector" format))))))
+         (error "Unknown format: %s.  Valid: :alist :plist :hash :vector :columnar" format))))))
 
 (provide 'duckdb-query)
 
