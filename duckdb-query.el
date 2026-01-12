@@ -117,14 +117,45 @@ ROWS is list of alists from JSON parsing.
 Returns alist of (COLUMN-NAME . VECTOR) pairs where each vector
 contains all values for that column.
 
+Uses hash table for O(1) column lookup and single-pass algorithm
+to minimize cache misses.
+
 Called by `duckdb-query' when FORMAT is `:columnar'."
   (when rows
-    (let ((columns (mapcar #'car (car rows))))
-      (mapcar (lambda (col)
-                (cons col (vconcat (mapcar (lambda (row)
-                                             (cdr (assoc col row)))
-                                           rows))))
-              columns))))
+    (let* ((row-count (length rows))
+           (first-row (car rows))
+           (columns (mapcar #'car first-row))
+           (col-count (length columns))
+           ;; Build column name -> index hash table
+           (col-index (let ((ht (make-hash-table :test 'equal :size col-count))
+                            (idx 0))
+                        (dolist (col columns)
+                          (puthash col idx ht)
+                          (setq idx (1+ idx)))
+                        ht))
+           ;; Pre-allocate all column vectors
+           (col-vectors (make-vector col-count nil)))
+
+      ;; Initialize column vectors
+      (dotimes (i col-count)
+        (aset col-vectors i (make-vector row-count nil)))
+
+      ;; Single pass: fill all columns row-by-row
+      (let ((row-idx 0))
+        (dolist (row rows)
+          (dolist (cell row)
+            (let ((col-idx (gethash (car cell) col-index)))
+              (when col-idx
+                (aset (aref col-vectors col-idx) row-idx (cdr cell)))))
+          (setq row-idx (1+ row-idx))))
+
+      ;; Build result alist
+      (let ((result nil)
+            (col-idx 0))
+        (dolist (col columns)
+          (push (cons col (aref col-vectors col-idx)) result)
+          (setq col-idx (1+ col-idx)))
+        (nreverse result)))))
 
 (defun duckdb-query--to-org-table (rows)
   "Convert ROWS to org-table format.
