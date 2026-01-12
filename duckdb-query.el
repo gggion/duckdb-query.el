@@ -67,6 +67,23 @@ Used by `duckdb-query-execute-raw' when TIMEOUT argument is nil."
   :type 'integer
   :group 'duckdb-query)
 
+(defcustom duckdb-query-null-value :null
+  "Value representing SQL NULL in query results.
+
+Used by `duckdb-query' when parsing JSON output from DuckDB."
+  :type '(choice (const :tag "Keyword :null" :null)
+                 (const :tag "Symbol nil" nil)
+                 (const :tag "String \"NULL\"" "NULL"))
+  :group 'duckdb-query)
+
+(defcustom duckdb-query-false-value :false
+  "Value representing SQL FALSE in query results.
+
+Used by `duckdb-query' when parsing JSON output from DuckDB."
+  :type '(choice (const :tag "Keyword :false" :false)
+                 (const :tag "Symbol nil" nil))
+  :group 'duckdb-query)
+
 ;;; Core Functions
 
 (defun duckdb-query-execute-raw (query &optional database timeout)
