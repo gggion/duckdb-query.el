@@ -243,6 +243,29 @@ Uses `duckdb-query-default-timeout' when :timeout not specified."
     ;; Delegate to existing implementation
     (duckdb-query-execute-raw query database timeout)))
 
+(cl-defmethod duckdb-query-execute ((executor function) query &rest args)
+  "Execute QUERY by calling EXECUTOR function with QUERY and ARGS.
+
+EXECUTOR must be a function accepting (query &rest args) and returning
+JSON string.
+
+This enables custom execution strategies without defining new executor
+types.  The function receives QUERY as first argument followed by all
+ARGS as keyword parameters.
+
+Example:
+
+  (defun my-executor (query &rest args)
+    (let ((db (plist-get args :database)))
+      ;; Custom execution logic
+      ...))
+
+  (duckdb-query \"SELECT 1\" :executor #\\='my-executor :database \"test.db\")
+
+Returns JSON string from executor function.
+Signals error if executor function signals error."
+  (apply executor query args))
+
 (cl-defun duckdb-query (query &key database timeout (format :alist))
   "Execute QUERY and return results in FORMAT.
 
