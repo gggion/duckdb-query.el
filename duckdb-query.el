@@ -220,6 +220,29 @@ The default `:cli' executor supports these ARGS:
   :timeout  - Execution timeout in seconds"
   (error "No executor method defined for %S" executor))
 
+(cl-defmethod duckdb-query-execute ((executor (eql :cli)) query &rest args)
+  "Execute QUERY via EXECUTOR with ARGS parameters.
+
+Supported ARGS:
+  :database - Database file path (nil for in-memory)
+  :readonly - Open database read-only (default t when :database provided)
+  :timeout  - Execution timeout in seconds
+
+Returns JSON string from DuckDB output.
+Signals error on non-zero exit code.
+
+Uses `duckdb-query-executable' for subprocess invocation.
+Uses `duckdb-query-default-timeout' when :timeout not specified."
+  (let* ((database (plist-get args :database))
+         (readonly (if (plist-member args :readonly)
+                       (plist-get args :readonly)
+                     ;; Default to readonly when database specified
+                     (and database t)))
+         (timeout (or (plist-get args :timeout)
+                      duckdb-query-default-timeout)))
+    ;; Delegate to existing implementation
+    (duckdb-query-execute-raw query database timeout)))
+
 (cl-defun duckdb-query (query &key database timeout (format :alist))
   "Execute QUERY and return results in FORMAT.
 
