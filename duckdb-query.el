@@ -193,6 +193,33 @@ Called by `duckdb-query' when FORMAT is `:org-table'."
                                    (aset row-vec idx (cdr cell))))
                                (append row-vec nil)))))))
 
+;;; Executor Protocol
+(cl-defgeneric duckdb-query-execute (executor query &rest args)
+  "Execute QUERY using EXECUTOR strategy, return JSON string.
+
+EXECUTOR controls execution strategy:
+  :cli       - Direct CLI invocation (default)
+  :session   - Named session (requires session backend)
+  function   - Custom executor function
+  object     - Custom executor object with methods
+
+QUERY is SQL string to execute.
+ARGS are executor-specific parameters passed as plist.
+
+Returns JSON string for parsing by conversion layer.
+Signals error on execution failure.
+
+This is a generic function. Implement methods for custom executors:
+
+  (cl-defmethod duckdb-query-execute ((executor my-executor) query &rest args)
+    ...)
+
+The default `:cli' executor supports these ARGS:
+  :database - Database file path (nil for in-memory)
+  :readonly - Open database read-only
+  :timeout  - Execution timeout in seconds"
+  (error "No executor method defined for %S" executor))
+
 (cl-defun duckdb-query (query &key database timeout (format :alist))
   "Execute QUERY and return results in FORMAT.
 
