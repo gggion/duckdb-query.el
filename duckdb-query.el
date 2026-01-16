@@ -215,31 +215,43 @@ Called by `duckdb-query-execute' :cli method."
         (error "DuckDB execution failed (exit %d): %s"
                exit-code (string-trim output))))))
 
-(cl-defmethod duckdb-query-execute ((executor (eql :cli)) query &rest args)
-  "Execute QUERY via DuckDB CLI with ARGS parameters.
-
-This is the default executor, wrapping `duckdb-query-execute-raw' with
-the executor protocol interface.
+(cl-defmethod duckdb-query-execute ((_executor (eql :cli)) query &rest args)
+  "Run QUERY with EXECUTOR via DuckDB CLI with enhanced parameter support.
 
 Supported ARGS:
-  :database - Database file path (nil for in-memory)
-  :readonly - Open database read-only (default t when :database provided)
-  :timeout  - Execution timeout in seconds
+  :database     - Database file path (nil for in-memory)
+  :readonly     - Open database read-only (default t when :database provided)
+  :timeout      - Execution timeout in seconds
+  :output-mode  - DuckDB output mode (default \\='json)
+  :init-file    - SQL file to execute before query
+  :separator    - Column separator for CSV mode
+  :nullvalue    - String to display for NULL values
 
 Returns JSON string from DuckDB output.
 Signals error on non-zero exit code.
 
-Uses `duckdb-query-executable' for subprocess invocation.
-Uses `duckdb-query-default-timeout' when :timeout not specified."
+Uses `duckdb-query--build-cli-args' to construct command-line arguments.
+Uses `duckdb-query--invoke-cli' for subprocess invocation.
+Uses `duckdb-query-executable' and `duckdb-query-default-timeout'."
   (let* ((database (plist-get args :database))
          (readonly (if (plist-member args :readonly)
                        (plist-get args :readonly)
                      ;; Default to readonly when database specified
                      (and database t)))
          (timeout (or (plist-get args :timeout)
-                      duckdb-query-default-timeout)))
-    ;; Delegate to existing implementation
-    (duckdb-query-execute-raw query database timeout)))
+                      duckdb-query-default-timeout))
+         (output-mode (or (plist-get args :output-mode) 'json))
+         (init-file (plist-get args :init-file))
+         (separator (plist-get args :separator))
+         (nullvalue (plist-get args :nullvalue))
+         (cli-args (duckdb-query--build-cli-args
+                    :database database
+                    :readonly readonly
+                    :output-mode output-mode
+                    :init-file init-file
+                    :separator separator
+                    :nullvalue nullvalue)))
+    (duckdb-query--invoke-cli cli-args query timeout)))
 
 ;;;;; Function Executors
 
