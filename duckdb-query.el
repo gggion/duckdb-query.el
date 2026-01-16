@@ -177,6 +177,33 @@ ensures state persists across queries."
          (when (file-exists-p ,db-var)
            (delete-file ,db-var))))))
 
+;;;; Interactive Functions
+(defun duckdb-query-set-default-database (&optional path)
+  "Set default database for `duckdb-query' to PATH.
+
+If PATH is nil or empty string, uses in-memory database.
+
+Returns previous default database.
+
+When called interactively, prompts for database file path.
+
+Example:
+
+  ;; Set global default
+  (duckdb-query-set-default-database \"app.db\")
+
+  ;; All subsequent queries use app.db
+  (duckdb-query \"SELECT * FROM users\")
+
+  ;; Clear default (use in-memory)
+  (duckdb-query-set-default-database nil)"
+  (interactive "fDatabase file (blank for in-memory): ")
+  (prog1 duckdb-query-default-database
+    (setq duckdb-query-default-database
+          (if (and path (not (string-empty-p path)))
+              (expand-file-name path)
+            nil))))
+
 ;;;; Executor Protocol
 ;;;;; Generic Function
 
