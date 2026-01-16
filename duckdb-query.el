@@ -147,6 +147,74 @@ See Info node `(duckdb-query) Executors' for details."
 
 ;;;;; CLI Executor
 
+(defun duckdb-query--build-cli-args (&rest params)
+  "Build DuckDB CLI argument list from PARAMS.
+
+PARAMS is plist with keys:
+  :database     - Database file path (nil for in-memory)
+  :readonly     - Open database read-only
+  :output-mode  - DuckDB output mode (json, csv, etc.)
+  :init-file    - SQL file to execute before query
+  :separator    - Column separator for CSV mode
+  :nullvalue    - String to display for NULL values
+
+Returns list of strings suitable for `call-process' invocation.
+
+Used by `duckdb-query-execute' :cli method to construct command-line
+arguments from keyword parameters.
+
+Example:
+  (duckdb-query--build-cli-args
+   :database \"test.db\"
+   :readonly t
+   :output-mode \\='json)
+  ;; => (\"duckdb\" \"test.db\" \"-readonly\" \"-json\")"
+  (let ((args (list duckdb-query-executable))
+        (database (plist-get params :database))
+        (readonly (plist-get params :readonly))
+        (output-mode (plist-get params :output-mode))
+        (init-file (plist-get params :init-file))
+        (separator (plist-get params :separator))
+        (nullvalue (plist-get params :nullvalue)))
+
+    ;; param insertion
+    (when database (push (expand-file-name database) args))   ;; Add database file if specified
+    (when readonly (push "-readonly" args))                   ;; Add readonly flag
+    (when output-mode (push (format "-%s" output-mode) args)) ;; Add output mode
+    (when init-file (push "-init" args) (push (expand-file-name init-file) args)) ;; Add init file
+    (when separator (push "-separator" args) (push separator args))               ;; Add separator
+    (when nullvalue (push "-nullvalue" args) (push nullvalue args))               ;; Add nullvalue
+
+    (nreverse args)))
+
+(defun duckdb-query--invoke-cli (cli-args query timeout)
+  "Invoke DuckDB CLI with CLI-ARGS, executing QUERY with TIMEOUT.
+
+CLI-ARGS is list of command-line arguments from
+`duckdb-query--build-cli-args'.
+QUERY is SQL string to execute.
+TIMEOUT is execution timeout in seconds (currently unused).
+
+Returns output string on success.
+Signals error with DuckDB's message on failure.
+
+Uses `call-process' for subprocess invocation.
+Sets DUCKDB_NO_COLOR environment variable to disable color codes.
+
+Called by `duckdb-query-execute' :cli method."
+  (with-temp-buffer
+    (let* ((default-directory temporary-file-directory)
+           (process-environment (cons "DUCKDB_NO_COLOR=1" process-environment))
+           (exit-code (apply #'call-process
+                             (car cli-args) nil t nil
+                             (append (cdr cli-args)
+                                     (list "-c" query))))
+           (output (buffer-string)))
+      (if (zerop exit-code)
+          output
+        (error "DuckDB execution failed (exit %d): %s"
+               exit-code (string-trim output))))))
+
 (cl-defmethod duckdb-query-execute ((executor (eql :cli)) query &rest args)
   "Execute QUERY via DuckDB CLI with ARGS parameters.
 
@@ -219,7 +287,6 @@ Signals error if EXECUTOR is not a function or if function signals error."
   (apply executor query args))
 
 ;;;; Low-Level Execution
-
 (defun duckdb-query-execute-raw (query &optional database _timeout)
   "Execute QUERY via DuckDB CLI and return raw JSON string.
 
@@ -245,46 +312,6 @@ Uses `duckdb-query-executable' for subprocess invocation."
             (buffer-string)
           (error "DuckDB execution failed (exit %d): %s"
                  exit-code (string-trim (buffer-string))))))))
-
-(defun duckdb-query--build-cli-args (&rest params)
-  "Build DuckDB CLI argument list from PARAMS.
-
-PARAMS is plist with keys:
-  :database     - Database file path (nil for in-memory)
-  :readonly     - Open database read-only
-  :output-mode  - DuckDB output mode (json, csv, etc.)
-  :init-file    - SQL file to execute before query
-  :separator    - Column separator for CSV mode
-  :nullvalue    - String to display for NULL values
-
-Returns list of strings suitable for `call-process' invocation.
-
-Used by `duckdb-query-execute' :cli method to construct command-line
-arguments from keyword parameters.
-
-Example:
-  (duckdb-query--build-cli-args
-   :database \"test.db\"
-   :readonly t
-   :output-mode \\='json)
-  ;; => (\"duckdb\" \"test.db\" \"-readonly\" \"-json\")"
-  (let ((args (list duckdb-query-executable))
-        (database (plist-get params :database))
-        (readonly (plist-get params :readonly))
-        (output-mode (plist-get params :output-mode))
-        (init-file (plist-get params :init-file))
-        (separator (plist-get params :separator))
-        (nullvalue (plist-get params :nullvalue)))
-
-    ;; param insertion
-    (when database (push (expand-file-name database) args))   ;; Add database file if specified
-    (when readonly (push "-readonly" args))                   ;; Add readonly flag
-    (when output-mode (push (format "-%s" output-mode) args)) ;; Add output mode
-    (when init-file (push "-init" args) (push (expand-file-name init-file) args)) ;; Add init file
-    (when separator (push "-separator" args) (push separator args))               ;; Add separator
-    (when nullvalue (push "-nullvalue" args) (push nullvalue args))               ;; Add nullvalue
-
-    (nreverse args)))
 
 ;;;; Format Conversion
 ;;;;; Columnar Format
