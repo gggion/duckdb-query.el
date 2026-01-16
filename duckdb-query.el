@@ -142,6 +142,41 @@ Example:
   `(let ((duckdb-query-default-database ,database))
      ,@body))
 
+(defmacro duckdb-with-transient-database (&rest body)
+  "Execute BODY with temporary file-based database.
+
+Creates temporary database file, executes BODY with that database as
+default, then deletes the file.  Unlike in-memory databases, temporary
+file databases persist across multiple CLI invocations within BODY,
+enabling queries that build on previous results.
+
+Returns value of last form in BODY.
+
+The temporary database file is deleted even if BODY signals error.
+
+Example:
+
+  (duckdb-with-transient-database
+    (duckdb-query \"CREATE TABLE temp (id INTEGER)\" :readonly nil)
+    (duckdb-query \"INSERT INTO temp VALUES (1), (2), (3)\" :readonly nil)
+    (duckdb-query \"SELECT COUNT(*) as count FROM temp\"))
+  ;; => (((\"count\" . 3)))
+
+Note: Cannot use in-memory database because each CLI invocation creates
+separate process with separate \":memory:\" database.  File-based approach
+ensures state persists across queries."
+  (declare (indent 0))
+  (let ((db-var (make-symbol "transient-db")))
+    `(let ((,db-var (expand-file-name
+                     (concat (make-temp-name "duckdb-transient-")
+                             ".duckdb")
+                     temporary-file-directory)))
+       (unwind-protect
+           (let ((duckdb-query-default-database ,db-var))
+             ,@body)
+         (when (file-exists-p ,db-var)
+           (delete-file ,db-var))))))
+
 ;;;; Executor Protocol
 ;;;;; Generic Function
 
