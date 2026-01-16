@@ -118,6 +118,29 @@ via `duckdb-with-database'.
 
 Nil means in-memory transient database.")
 
+;;;; Context Management Macro
+(defmacro duckdb-with-database (database &rest body)
+  "Execute BODY with DATABASE as default connection.
+
+All `duckdb-query' calls within BODY use DATABASE unless overridden
+by explicit :database parameter.
+
+DATABASE is evaluated once and bound dynamically for BODY execution.
+
+Returns value of last form in BODY.
+
+Example:
+
+  (duckdb-with-database \"app.db\"
+    (duckdb-query \"CREATE TABLE users (id INTEGER, name TEXT)\"
+                  :readonly nil)
+    (duckdb-query \"INSERT INTO users VALUES (1, \\='Alice\\=')\"
+                  :readonly nil)
+    (duckdb-query \"SELECT * FROM users\"))
+  ;; => (((\"id\" . 1) (\"name\" . \"Alice\")))"
+  (declare (indent 1))
+  `(let ((duckdb-query-default-database ,database))
+     ,@body))
 
 ;;;; Executor Protocol
 ;;;;; Generic Function
