@@ -41,7 +41,13 @@
 ;;
 ;; The package provides:
 ;; - `duckdb-query' - Execute queries and return Elisp data structures
+;; - `duckdb-query-execute' - Generic function for pluggable executors
 ;; - `duckdb-query-execute-raw' - Low-level CLI execution
+;;
+;; Execution strategies (via :executor parameter):
+;; - :cli (default) - Direct CLI invocation
+;; - function - Custom executor function
+;; - Custom objects via cl-defmethod
 ;;
 ;; Supported output formats:
 ;; - :alist (default) - List of association lists (row-oriented)
@@ -62,7 +68,7 @@
 
 (require 'cl-lib)
 
-;;; Customization
+;;;; Customization
 
 (defgroup duckdb-query nil
   "Execute DuckDB queries with transducers."
@@ -72,21 +78,21 @@
 (defcustom duckdb-query-executable "duckdb"
   "Path to DuckDB executable.
 
-Used by `duckdb-query-execute-raw'."
+Used by `duckdb-query-execute-raw' and the `:cli' executor method."
   :type 'string
   :group 'duckdb-query)
 
 (defcustom duckdb-query-default-timeout 30
   "Default timeout in seconds for query execution.
 
-Used by `duckdb-query-execute-raw' when TIMEOUT argument is nil."
+Used by `:cli' executor when :timeout argument is nil."
   :type 'integer
   :group 'duckdb-query)
 
 (defcustom duckdb-query-null-value :null
   "Value representing SQL NULL in query results.
 
-Used by `duckdb-query' when parsing JSON output from DuckDB."
+Used when parsing JSON output from DuckDB."
   :type '(choice (const :tag "Keyword :null" :null)
                  (const :tag "Symbol nil" nil)
                  (const :tag "String \"NULL\"" "NULL"))
@@ -95,15 +101,130 @@ Used by `duckdb-query' when parsing JSON output from DuckDB."
 (defcustom duckdb-query-false-value :false
   "Value representing SQL FALSE in query results.
 
-Used by `duckdb-query' when parsing JSON output from DuckDB."
+Used when parsing JSON output from DuckDB."
   :type '(choice (const :tag "Keyword :false" :false)
                  (const :tag "Symbol nil" nil))
   :group 'duckdb-query)
 
-;;; Core Functions
+;;;; Executor Protocol
+;;;;; Generic Function
+
+(cl-defgeneric duckdb-query-execute (executor query &rest args)
+  "Execute QUERY using EXECUTOR strategy, return JSON string.
+
+This is the core extension point for pluggable execution strategies.
+Implement methods for custom executors to integrate different backends
+while leveraging the unified conversion layer.
+
+EXECUTOR controls execution strategy:
+  :cli       - Direct CLI invocation (default)
+  :session   - Named session (requires session backend)
+  function   - Custom executor function
+  symbol     - Function name as symbol
+  object     - Custom executor object with methods
+
+QUERY is SQL string to execute.
+
+ARGS are executor-specific parameters passed as plist.  The `:cli'
+executor supports:
+  :database - Database file path (nil for in-memory)
+  :readonly - Open database read-only
+  :timeout  - Execution timeout in seconds
+
+Returns JSON string for parsing by conversion layer.
+Signals error on execution failure.
+
+To implement a custom executor:
+
+  (cl-defmethod duckdb-query-execute ((executor my-executor) query &rest args)
+    \"Execute QUERY using my custom backend.\"
+    ;; Your implementation here
+    ;; Must return JSON string
+    )
+
+See Info node `(duckdb-query) Executors' for details."
+  (error "No executor method defined for %S" executor))
+
+;;;;; CLI Executor
+
+(cl-defmethod duckdb-query-execute ((executor (eql :cli)) query &rest args)
+  "Execute QUERY via DuckDB CLI with ARGS parameters.
+
+This is the default executor, wrapping `duckdb-query-execute-raw' with
+the executor protocol interface.
+
+Supported ARGS:
+  :database - Database file path (nil for in-memory)
+  :readonly - Open database read-only (default t when :database provided)
+  :timeout  - Execution timeout in seconds
+
+Returns JSON string from DuckDB output.
+Signals error on non-zero exit code.
+
+Uses `duckdb-query-executable' for subprocess invocation.
+Uses `duckdb-query-default-timeout' when :timeout not specified."
+  (let* ((database (plist-get args :database))
+         (readonly (if (plist-member args :readonly)
+                       (plist-get args :readonly)
+                     ;; Default to readonly when database specified
+                     (and database t)))
+         (timeout (or (plist-get args :timeout)
+                      duckdb-query-default-timeout)))
+    ;; Delegate to existing implementation
+    (duckdb-query-execute-raw query database timeout)))
+
+;;;;; Function Executors
+
+(cl-defmethod duckdb-query-execute ((executor function) query &rest args)
+  "Execute QUERY by calling EXECUTOR function with QUERY and ARGS.
+
+EXECUTOR must be a function accepting (query &rest args) and returning
+JSON string.
+
+This enables custom execution strategies without defining new executor
+types.  The function receives QUERY as first argument followed by all
+ARGS as keyword parameters.
+
+Example:
+
+  (defun my-executor (query &rest args)
+    (let ((db (plist-get args :database)))
+      ;; Custom execution logic
+      ...))
+
+  (duckdb-query \"SELECT 1\" :executor #\\='my-executor :database \"test.db\")
+
+Returns JSON string from executor function.
+Signals error if executor function signals error."
+  (apply executor query args))
+
+(cl-defmethod duckdb-query-execute ((executor symbol) query &rest args)
+  "Execute QUERY by calling function named by EXECUTOR symbol.
+
+EXECUTOR must be a symbol naming a function that accepts (query &rest args)
+and returns JSON string.
+
+This handles the case where users pass function names as symbols rather
+than function objects.
+
+Example:
+
+  (duckdb-query \"SELECT 1\" :executor \\='my-executor)
+  (duckdb-query \"SELECT 1\" :executor #\\='my-executor)
+
+Returns JSON string from executor function.
+Signals error if EXECUTOR is not a function or if function signals error."
+  (unless (fboundp executor)
+    (error "Symbol %S is not a function" executor))
+  (apply executor query args))
+
+;;;; Low-Level Execution
 
 (defun duckdb-query-execute-raw (query &optional database _timeout)
   "Execute QUERY via DuckDB CLI and return raw JSON string.
+
+This is the low-level execution primitive used by the `:cli' executor.
+Most code should use `duckdb-query' or `duckdb-query-execute' instead.
 
 QUERY is SQL string.
 DATABASE is optional path to database file; nil uses in-memory.
@@ -112,7 +233,6 @@ _TIMEOUT is reserved for future use; currently ignored.
 Returns raw JSON output string for parsing.
 Signals error on non-zero exit code.
 
-Called by `duckdb-query'.
 Uses `duckdb-query-executable' for subprocess invocation."
   (with-temp-buffer
     (let* ((cmd (if database
@@ -125,6 +245,9 @@ Uses `duckdb-query-executable' for subprocess invocation."
             (buffer-string)
           (error "DuckDB execution failed (exit %d): %s"
                  exit-code (string-trim (buffer-string))))))))
+
+;;;; Format Conversion
+;;;;; Columnar Format
 
 (defun duckdb-query--to-columnar (rows)
   "Convert ROWS to columnar format.
@@ -165,6 +288,8 @@ Called by `duckdb-query' when FORMAT is `:columnar'."
                for col-idx from 0
                collect (cons col (aref col-vectors col-idx))))))
 
+;;;;; Org-Table Format
+
 (defun duckdb-query--to-org-table (rows)
   "Convert ROWS to org-table format.
 
@@ -193,99 +318,7 @@ Called by `duckdb-query' when FORMAT is `:org-table'."
                                    (aset row-vec idx (cdr cell))))
                                (append row-vec nil)))))))
 
-;;; Executor Protocol
-(cl-defgeneric duckdb-query-execute (executor query &rest args)
-  "Execute QUERY using EXECUTOR strategy, return JSON string.
-
-EXECUTOR controls execution strategy:
-  :cli       - Direct CLI invocation (default)
-  :session   - Named session (requires session backend)
-  function   - Custom executor function
-  object     - Custom executor object with methods
-
-QUERY is SQL string to execute.
-ARGS are executor-specific parameters passed as plist.
-
-Returns JSON string for parsing by conversion layer.
-Signals error on execution failure.
-
-This is a generic function. Implement methods for custom executors:
-
-  (cl-defmethod duckdb-query-execute ((executor my-executor) query &rest args)
-    ...)
-
-The default `:cli' executor supports these ARGS:
-  :database - Database file path (nil for in-memory)
-  :readonly - Open database read-only
-  :timeout  - Execution timeout in seconds"
-  (error "No executor method defined for %S" executor))
-
-(cl-defmethod duckdb-query-execute ((executor (eql :cli)) query &rest args)
-  "Execute QUERY via EXECUTOR with ARGS parameters.
-
-Supported ARGS:
-  :database - Database file path (nil for in-memory)
-  :readonly - Open database read-only (default t when :database provided)
-  :timeout  - Execution timeout in seconds
-
-Returns JSON string from DuckDB output.
-Signals error on non-zero exit code.
-
-Uses `duckdb-query-executable' for subprocess invocation.
-Uses `duckdb-query-default-timeout' when :timeout not specified."
-  (let* ((database (plist-get args :database))
-         (readonly (if (plist-member args :readonly)
-                       (plist-get args :readonly)
-                     ;; Default to readonly when database specified
-                     (and database t)))
-         (timeout (or (plist-get args :timeout)
-                      duckdb-query-default-timeout)))
-    ;; Delegate to existing implementation
-    (duckdb-query-execute-raw query database timeout)))
-
-(cl-defmethod duckdb-query-execute ((executor function) query &rest args)
-  "Execute QUERY by calling EXECUTOR function with QUERY and ARGS.
-
-EXECUTOR must be a function accepting (query &rest args) and returning
-JSON string.
-
-This enables custom execution strategies without defining new executor
-types.  The function receives QUERY as first argument followed by all
-ARGS as keyword parameters.
-
-Example:
-
-  (defun my-executor (query &rest args)
-    (let ((db (plist-get args :database)))
-      ;; Custom execution logic
-      ...))
-
-  (duckdb-query \"SELECT 1\" :executor #\\='my-executor :database \"test.db\")
-
-Returns JSON string from executor function.
-Signals error if executor function signals error."
-  (apply executor query args))
-
-;; method for symbols that are functions
-(cl-defmethod duckdb-query-execute ((executor symbol) query &rest args)
-  "Execute QUERY by calling function named by EXECUTOR symbol.
-
-EXECUTOR must be a symbol naming a function that accepts (query &rest args)
-and returns JSON string.
-
-This handles the case where users pass function names as symbols rather
-than function objects.
-
-Example:
-
-  (duckdb-query \"SELECT 1\" :executor \\='my-executor)
-  (duckdb-query \"SELECT 1\" :executor #\\='my-executor)
-
-Returns JSON string from executor function.
-Signals error if EXECUTOR is not a function or if function signals error."
-  (unless (fboundp executor)
-    (error "Symbol %S is not a function" executor))
-  (apply executor query args))
+;;;; Main Entry Point
 
 (cl-defun duckdb-query (query &key
                               database
@@ -293,6 +326,9 @@ Signals error if EXECUTOR is not a function or if function signals error."
                               (format :alist)
                               (executor :cli))
   "Execute QUERY and return results in FORMAT.
+
+This is the main entry point for executing DuckDB queries and converting
+results to Elisp data structures.
 
 QUERY is SQL string to execute.
 
@@ -313,14 +349,17 @@ FORMAT is output structure, one of:
 EXECUTOR controls execution strategy:
   :cli      - Direct CLI invocation (default)
   function  - Custom executor function
+  symbol    - Function name as symbol
   object    - Custom executor object
 
 Returns nil for empty results.
 Returns converted data in FORMAT for successful queries.
 Returns raw output string for non-JSON results (errors, non-tabular output).
 
-Uses `duckdb-query-execute' for execution via executor protocol.
-Uses `json-parse-string' for C-level JSON parsing.
+Execution is delegated to `duckdb-query-execute' generic function,
+enabling pluggable backends.  JSON parsing uses `json-parse-string'
+with format-specific :object-type parameter for efficient conversion.
+
 Uses `duckdb-query-null-value' and `duckdb-query-false-value'
 for null/false representation.
 Uses `duckdb-query--to-columnar' for columnar conversion.
