@@ -187,7 +187,7 @@ Example:
 
     (nreverse args)))
 
-(defun duckdb-query--invoke-cli (cli-args query timeout)
+(defun duckdb-query--invoke-cli (cli-args query _timeout)
   "Invoke DuckDB CLI with CLI-ARGS, executing QUERY with TIMEOUT.
 
 CLI-ARGS is list of command-line arguments from
@@ -511,6 +511,32 @@ Examples:
          ;; Not JSON or malformed - return raw output
          ;; This handles: errors, non-tabular results, etc.
          json-output)))))
+
+(cl-defun duckdb-query-file (file &key database readonly (format :alist))
+  "Execute SQL from FILE and return results in FORMAT.
+
+FILE is path to SQL file containing query.
+DATABASE is optional database file path (nil for in-memory).
+READONLY defaults to t when DATABASE specified.
+FORMAT is output structure (:alist, :columnar, :org-table, etc.).
+
+Returns converted results in specified FORMAT.
+Returns nil for empty results.
+Returns raw output string for non-JSON results.
+
+Uses `duckdb-query' with SQL read from FILE.
+
+Example:
+  (duckdb-query-file \"queries/analysis.sql\"
+                     :database \"data.db\"
+                     :format :columnar)"
+  (let ((sql (with-temp-buffer
+               (insert-file-contents file)
+               (buffer-string))))
+    (duckdb-query sql
+                  :database database
+                  :readonly readonly
+                  :format format)))
 
 (provide 'duckdb-query)
 
