@@ -266,6 +266,27 @@ Returns JSON string from executor function.
 Signals error if executor function signals error."
   (apply executor query args))
 
+;; method for symbols that are functions
+(cl-defmethod duckdb-query-execute ((executor symbol) query &rest args)
+  "Execute QUERY by calling function named by EXECUTOR symbol.
+
+EXECUTOR must be a symbol naming a function that accepts (query &rest args)
+and returns JSON string.
+
+This handles the case where users pass function names as symbols rather
+than function objects.
+
+Example:
+
+  (duckdb-query \"SELECT 1\" :executor \\='my-executor)
+  (duckdb-query \"SELECT 1\" :executor #\\='my-executor)
+
+Returns JSON string from executor function.
+Signals error if EXECUTOR is not a function or if function signals error."
+  (unless (fboundp executor)
+    (error "Symbol %S is not a function" executor))
+  (apply executor query args))
+
 (cl-defun duckdb-query (query &key
                               database
                               timeout
