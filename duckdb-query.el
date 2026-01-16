@@ -106,6 +106,19 @@ Used when parsing JSON output from DuckDB."
                  (const :tag "Symbol nil" nil))
   :group 'duckdb-query)
 
+;;;; Internal Variables
+(defvar duckdb-query-default-database nil
+  "Default database file for `duckdb-query' when not specified.
+
+When non-nil, all queries use this database unless overridden by
+explicit :database parameter.
+
+Set via `duckdb-query-set-default-database' or dynamically bound
+via `duckdb-with-database'.
+
+Nil means in-memory transient database.")
+
+
 ;;;; Executor Protocol
 ;;;;; Generic Function
 
