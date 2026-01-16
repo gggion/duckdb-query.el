@@ -399,11 +399,12 @@ Called by `duckdb-query' when FORMAT is `:org-table'."
 
 ;;;; Main Entry Point
 
-(cl-defun duckdb-query (query &key
+(cl-defun duckdb-query (query &rest args &key
                               database
                               timeout
                               (format :alist)
-                              (executor :cli))
+                              (executor :cli)
+                              &allow-other-keys)
   "Execute QUERY and return results in FORMAT.
 
 This is the main entry point for executing DuckDB queries and converting
@@ -430,6 +431,14 @@ EXECUTOR controls execution strategy:
   function  - Custom executor function
   symbol    - Function name as symbol
   object    - Custom executor object
+
+Additional keyword arguments in ARGS are passed to EXECUTOR.
+The :cli executor supports:
+  :readonly     - Open database read-only (default t when :database provided)
+  :output-mode  - DuckDB output mode (default \\`'json)
+  :init-file    - SQL file to execute before query
+  :separator    - Column separator for CSV mode
+  :nullvalue    - String to display for NULL values
 
 Returns nil for empty results.
 Returns converted data in FORMAT for successful queries.
@@ -458,10 +467,18 @@ Examples:
   ;; => ((\"id\" . [1 2 3]) (\"name\" . [\"Alice\" \"Bob\" \"Carol\"]))
 
   ;; Custom executor
-  (duckdb-query \"SELECT 1\" :executor #\\='my-custom-executor)"
-  (let* ((json-output (duckdb-query-execute executor query
-                                            :database database
-                                            :timeout timeout)))
+  (duckdb-query \"SELECT 1\" :executor #\\='my-custom-executor)
+
+  ;; With init file
+  (duckdb-query \"SELECT * FROM test\"
+                :database \"app.db\"
+                :init-file \"setup.sql\")"
+  (let* ((json-output (apply #'duckdb-query-execute
+                             executor
+                             query
+                             :database database
+                             :timeout timeout
+                             args)))
     (when (and json-output (not (string-empty-p (string-trim json-output))))
       (condition-case err
           ;; Try to parse as JSON with format-specific parameters
