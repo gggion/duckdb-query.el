@@ -425,7 +425,8 @@ results to Elisp data structures.
 
 QUERY is SQL string to execute.
 
-DATABASE is optional database file path.  When nil, uses in-memory
+DATABASE is optional database file path.  When nil, uses
+`duckdb-query-default-database' if set, otherwise uses in-memory
 transient database.
 
 TIMEOUT is optional execution timeout in seconds.  Defaults to
@@ -448,7 +449,7 @@ EXECUTOR controls execution strategy:
 Additional keyword arguments in ARGS are passed to EXECUTOR.
 The :cli executor supports:
   :readonly     - Open database read-only (default t when :database provided)
-  :output-mode  - DuckDB output mode (default \\`'json)
+  :output-mode  - DuckDB output mode (default \\='json)
   :init-file    - SQL file to execute before query
   :separator    - Column separator for CSV mode
   :nullvalue    - String to display for NULL values
@@ -475,6 +476,10 @@ Examples:
   ;; Query database file
   (duckdb-query \"SELECT * FROM users\" :database \"app.db\")
 
+  ;; Use default database
+  (setq duckdb-query-default-database \"app.db\")
+  (duckdb-query \"SELECT * FROM users\")
+
   ;; Columnar format for analysis
   (duckdb-query \"SELECT * FROM data.csv\" :format :columnar)
   ;; => ((\"id\" . [1 2 3]) (\"name\" . [\"Alice\" \"Bob\" \"Carol\"]))
@@ -486,10 +491,11 @@ Examples:
   (duckdb-query \"SELECT * FROM test\"
                 :database \"app.db\"
                 :init-file \"setup.sql\")"
-  (let* ((json-output (apply #'duckdb-query-execute
+  (let* ((db (or database duckdb-query-default-database))
+         (json-output (apply #'duckdb-query-execute
                              executor
                              query
-                             :database database
+                             :database db
                              :timeout timeout
                              args)))
     (when (and json-output (not (string-empty-p (string-trim json-output))))
