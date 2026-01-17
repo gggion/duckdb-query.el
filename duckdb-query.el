@@ -107,6 +107,7 @@ Used when parsing JSON output from DuckDB."
   :group 'duckdb-query)
 
 ;;;; Internal Variables
+
 (defvar duckdb-query-default-database nil
   "Default database file for `duckdb-query' when not specified.
 
@@ -118,7 +119,203 @@ via `duckdb-with-database'.
 
 Nil means in-memory transient database.")
 
+;;;; Data Extraction Utilities
+
+(defun duckdb-query-value (query &rest args)
+  "Return single scalar value from QUERY.
+
+QUERY is SQL string that must return exactly one row with one column.
+ARGS are passed to `duckdb-query'.
+
+Returns the scalar value, or nil for empty results.
+
+Signals `user-error' if result has multiple rows or columns.
+
+Example:
+
+  (duckdb-query-value \"SELECT COUNT(*) FROM users\")
+  ;; => 42
+
+  (duckdb-query-value \"SELECT MAX(price) FROM orders\"
+                      :database \"sales.db\")
+  ;; => 99.95
+
+Also see `duckdb-query-column' for extracting entire columns."
+  (let* ((result (apply #'duckdb-query query :format :alist args))
+         (row (car result)))
+    (cond
+     ((null result)
+      nil)
+     ((cdr result)
+      (user-error "duckdb-query-value: query returned %d rows, expected 1"
+                  (length result)))
+     ((cdr row)
+      (user-error "duckdb-query-value: query returned %d columns, expected 1"
+                  (length row)))
+     (t
+      (cdar row)))))
+
+(defun duckdb-query-column (query &rest args)
+  "Return single column from QUERY as list.
+
+QUERY is SQL string to execute.
+
+ARGS are keyword arguments:
+  :column    - Column name string.  When nil, returns first column.
+  :as-vector - When non-nil, return vector instead of list.
+
+Other ARGS are passed to `duckdb-query'.
+
+Returns list of column values, or vector if :as-vector is non-nil.
+Returns nil for empty results.
+
+Example:
+
+  (duckdb-query-column \"SELECT name FROM users ORDER BY id\")
+  ;; => (\"Alice\" \"Bob\" \"Carol\")
+
+  (duckdb-query-column \"SELECT id, name FROM users\"
+                       :column \"name\")
+  ;; => (\"Alice\" \"Bob\" \"Carol\")
+
+  (duckdb-query-column \"SELECT value FROM data\" :as-vector t)
+  ;; => [1 2 3 4 5]
+
+Also see `duckdb-query-value' for scalar extraction.
+Also see `duckdb-query' with :format :columnar for multiple columns."
+  (let* ((column (plist-get args :column))
+         (as-vector (plist-get args :as-vector))
+         (clean-args (cl-loop for (k v) on args by #'cddr
+                              unless (memq k '(:column :as-vector))
+                              append (list k v)))
+         (result (apply #'duckdb-query query :format :columnar clean-args))
+         (col-data (if column
+                       ;; Column names in columnar format are symbols
+                       (cdr (assq (intern column) result))
+                     (cdar result))))
+    (cond
+     ((null col-data)
+      nil)
+     (as-vector
+      col-data)
+     (t
+      (append col-data nil)))))
+
+;;;; Schema Introspection
+
+(defun duckdb-query-describe (source &rest args)
+  "Return schema information for SOURCE.
+
+SOURCE can be:
+- Table name: \"users\"
+- File path: \"/path/to/data.parquet\" or \"~/data.csv\"
+- Remote URL: \"https://example.com/data.csv\"
+- SELECT query: \"SELECT * FROM users WHERE active\"
+
+ARGS are passed to `duckdb-query'.
+
+For SELECT queries, wraps SOURCE in DESCRIBE(...).
+For tables, files, and URLs, uses DESCRIBE directly.
+
+Returns list of alists, one per column:
+
+  (((\"column_name\" . \"id\")
+    (\"column_type\" . \"INTEGER\")
+    (\"null\" . \"YES\")
+    (\"key\" . :null)
+    (\"default\" . :null)
+    (\"extra\" . :null))
+   ...)
+
+The =column_name= and =column_type= fields are always populated.
+Other fields may be :null depending on SOURCE type; database tables
+with constraints populate =key= and =default=.
+
+Signals `user-error' for DDL statements (CREATE, INSERT, DROP, etc.)
+which cannot be described directly.  Create the table first, then
+describe it by name.
+
+Uses `duckdb-query-default-database' when SOURCE is a table name.
+
+Example:
+
+  (duckdb-query-describe \"users\")
+  (duckdb-query-describe \"~/data/sales.parquet\")
+  (duckdb-query-describe \"SELECT a, b FROM t WHERE x > 10\")
+
+Also see `duckdb-query-columns' to extract column names.
+Also see `duckdb-query-column-types' for name-to-type mapping."
+  (let* ((source-trimmed (string-trim source))
+         (query
+          (cond
+           ;; File path (absolute, home-relative, or relative with extension)
+           ((or (string-prefix-p "/" source-trimmed)
+                (string-prefix-p "~" source-trimmed)
+                (string-match-p "\\.\\(parquet\\|csv\\|json\\)\\'" source-trimmed))
+            (format "DESCRIBE '%s'" source-trimmed))
+           ;; Remote URL
+           ((string-match-p "\\`https?://" source-trimmed)
+            (format "DESCRIBE '%s'" source-trimmed))
+           ;; SELECT query - wrap in DESCRIBE(...)
+           ((string-match-p "\\`SELECT\\b" source-trimmed)
+            (format "DESCRIBE (%s)" source-trimmed))
+           ;; DDL - reject with guidance
+           ((string-match-p
+             "\\`\\(CREATE\\|INSERT\\|UPDATE\\|DELETE\\|DROP\\|ALTER\\)\\b"
+             source-trimmed)
+            (user-error
+             "Cannot describe DDL statement; create table first, then describe by name"))
+           ;; Assume table name
+           (t
+            (format "DESCRIBE %s" source-trimmed)))))
+    (apply #'duckdb-query query :format :alist args)))
+
+(defun duckdb-query-columns (source &rest args)
+  "Return list of column names for SOURCE.
+
+SOURCE can be table name, file path, URL, or SELECT query.
+ARGS are passed to `duckdb-query-describe'.
+
+Returns list of column name strings.
+
+Example:
+
+  (duckdb-query-columns \"users\")
+  ;; => (\"id\" \"name\" \"email\" \"created_at\")
+
+  (duckdb-query-columns \"~/data/sales.parquet\")
+  ;; => (\"date\" \"product\" \"quantity\" \"price\")
+
+Also see `duckdb-query-describe' for full column metadata.
+Also see `duckdb-query-column-types' for name-to-type mapping."
+  (mapcar (lambda (row) (cdr (assq 'column_name row)))
+          (apply #'duckdb-query-describe source args)))
+
+(defun duckdb-query-column-types (source &rest args)
+  "Return alist mapping column names to DuckDB types for SOURCE.
+
+SOURCE can be table name, file path, URL, or SELECT query.
+ARGS are passed to `duckdb-query-describe'.
+
+Returns alist of (NAME . TYPE) pairs where NAME is column name
+string and TYPE is DuckDB type string.
+
+Example:
+
+  (duckdb-query-column-types \"users\")
+  ;; => ((\"id\" . \"INTEGER\")
+  ;;     (\"name\" . \"VARCHAR\")
+  ;;     (\"created_at\" . \"TIMESTAMP\"))
+
+Also see `duckdb-query-describe' for full column metadata.
+Also see `duckdb-query-columns' for just column names."
+  (mapcar (lambda (row)
+            (cons (cdr (assq 'column_name row))
+                  (cdr (assq 'column_type row))))
+          (apply #'duckdb-query-describe source args)))
+
 ;;;; Context Management Macro
+
 (defmacro duckdb-with-database (database &rest body)
   "Execute BODY with DATABASE as default connection.
 
