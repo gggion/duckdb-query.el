@@ -5,7 +5,7 @@
 ;; Homepage: https://github.com/gggion/duckdb-query.el
 ;; Keywords: data sql
 
-;; Package-Version: 0.3.0
+;; Package-Version: 0.4.0
 ;; Package-Requires: ((emacs "28.1"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
