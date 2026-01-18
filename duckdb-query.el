@@ -25,45 +25,38 @@
 
 ;;; Commentary:
 
-;; Convert DuckDB query results into native Emacs Lisp data structures.
-;;
-;; This package bridges DuckDB's analytical capabilities with Emacs Lisp's
-;; data manipulation facilities by executing SQL queries and returning
-;; results as idiomatic Elisp structures.
+;; Execute DuckDB queries and return results as Elisp data structures.
 ;;
 ;; Basic usage:
 ;;
 ;;     (duckdb-query "SELECT 42 as answer, 'hello' as greeting")
-;;     ;; => ((("answer" . 42) ("greeting" . "hello")))
+;;     ;; => (((answer . 42) (greeting . "hello")))
 ;;
 ;;     (duckdb-query "SELECT * FROM 'data.csv'" :format :columnar)
-;;     ;; => (("id" . [1 2 3]) ("name" . ["Alice" "Bob" "Carol"]))
+;;     ;; => ((id . [1 2 3]) (name . ["Alice" "Bob" "Carol"]))
+;;
+;; Database context management:
+;;
+;;     (duckdb-with-database "app.db"
+;;       (duckdb-query "SELECT * FROM users"))
 ;;
 ;; The package provides:
-;; - `duckdb-query' - Execute queries and return Elisp data structures
-;; - `duckdb-query-execute' - Generic function for pluggable executors
-;; - `duckdb-query-execute-raw' - Low-level CLI execution
+;; - `duckdb-query' - Execute queries with format conversion
+;; - `duckdb-query-value' - Extract single scalar value
+;; - `duckdb-query-column' - Extract single column as list
+;; - `duckdb-query-describe' - Schema introspection
+;; - `duckdb-with-database' - Scoped database context
+;; - `duckdb-with-transient-database' - Temporary file-based database
 ;;
-;; Execution strategies (via :executor parameter):
+;; Output formats via :format parameter:
+;; - :alist (default), :plist, :hash, :vector, :columnar, :org-table
+;;
+;; Execution strategies via :executor parameter:
 ;; - :cli (default) - Direct CLI invocation
 ;; - function - Custom executor function
-;; - Custom objects via cl-defmethod
+;; - Custom objects via `cl-defmethod'
 ;;
-;; Supported output formats:
-;; - :alist (default) - List of association lists (row-oriented)
-;; - :plist - List of property lists (row-oriented)
-;; - :hash - List of hash tables (row-oriented)
-;; - :vector - Vector of association lists (row-oriented)
-;; - :columnar - Association list of vectors (column-oriented)
-;; - :org-table - List of lists for org-mode tables
-;;
-;; Each format is optimized for different use cases:
-;; - Row-oriented formats for record processing
-;; - Columnar format for analytical operations
-;; - Org-table format for display and export
-;;
-;; For performance benchmarking, see duckdb-query-bench.el.
-
+;; For benchmarking, see duckdb-query-bench.el.
 ;;; Code:
 
 (require 'cl-lib)
