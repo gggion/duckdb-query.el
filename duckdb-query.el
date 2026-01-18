@@ -408,7 +408,7 @@ Example:
 ;;;; Executor Protocol
 ;;;;; Generic Function
 
-(cl-defgeneric duckdb-query-execute (executor query &rest args)
+(cl-defgeneric duckdb-query-execute (executor _query &rest _args)
   "Execute QUERY using EXECUTOR strategy, return JSON string.
 
 This is the core extension point for pluggable execution strategies.
@@ -783,7 +783,7 @@ Examples:
                              :timeout timeout
                              args)))
     (when (and json-output (not (string-empty-p (string-trim json-output))))
-      (condition-case err
+      (condition-case nil
           ;; Try to parse as JSON with format-specific parameters
           (pcase format
             (:alist
