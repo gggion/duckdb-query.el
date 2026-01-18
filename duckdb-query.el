@@ -339,7 +339,7 @@ Example:
                   :readonly nil)
     (duckdb-query \"SELECT * FROM users\"))
   ;; => (((\"id\" . 1) (\"name\" . \"Alice\")))"
-  (declare (indent 1))
+  (declare (indent 1) (debug t))
   `(let ((duckdb-query-default-database ,database))
      ,@body))
 
@@ -366,7 +366,7 @@ Example:
 Note: Cannot use in-memory database because each CLI invocation creates
 separate process with separate \":memory:\" database.  File-based approach
 ensures state persists across queries."
-  (declare (indent 0))
+  (declare (indent 0) (debug t))
   (let ((db-var (make-symbol "transient-db")))
     `(let ((,db-var (expand-file-name
                      (concat (make-temp-name "duckdb-transient-")
