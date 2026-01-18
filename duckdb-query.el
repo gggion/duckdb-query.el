@@ -151,10 +151,10 @@ Also see `duckdb-query-column' for extracting entire columns."
      ((null result)
       nil)
      ((cdr result)
-      (user-error "duckdb-query-value: query returned %d rows, expected 1"
+      (user-error "Query returned %d rows, expected 1"
                   (length result)))
      ((cdr row)
-      (user-error "duckdb-query-value: query returned %d columns, expected 1"
+      (user-error "Query returned %d columns, expected 1"
                   (length row)))
      (t
       (cdar row)))))
