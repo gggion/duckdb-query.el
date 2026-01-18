@@ -703,7 +703,7 @@ Returns alist suitable for `duckdb-query-bench-compare'."
     (read (current-buffer))))
 
 (defun duckdb-query-bench-tabulate (benchmark-data)
-  "Format BENCHMARK-DATA as aligned org-mode table string.
+  "Format BENCHMARK-DATA as aligned `org-mode' table string.
 
 BENCHMARK-DATA is plist from `duckdb-query-bench-runner' containing
 :metadata and :results keys.
