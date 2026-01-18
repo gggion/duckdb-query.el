@@ -165,13 +165,13 @@ Also see `duckdb-query-column' for extracting entire columns."
 QUERY is SQL string to execute.
 
 ARGS are keyword arguments:
-  :column    - Column name string.  When nil, returns first column.
+  :column    - Column name string.  When nil, return first column.
   :as-vector - When non-nil, return vector instead of list.
 
 Other ARGS are passed to `duckdb-query'.
 
-Returns list of column values, or vector if :as-vector is non-nil.
-Returns nil for empty results.
+Return list of column values, or vector if :as-vector is non-nil.
+Return nil for empty results.
 
 Example:
 
@@ -218,10 +218,10 @@ SOURCE can be:
 
 ARGS are passed to `duckdb-query'.
 
-For SELECT queries, wraps SOURCE in DESCRIBE(...).
-For tables, files, and URLs, uses DESCRIBE directly.
+For SELECT queries, wrap SOURCE in DESCRIBE(...).
+For tables, files, and URLs, use DESCRIBE directly.
 
-Returns list of alists, one per column:
+Return list of alists, one per column:
 
   (((\"column_name\" . \"id\")
     (\"column_type\" . \"INTEGER\")
@@ -231,15 +231,15 @@ Returns list of alists, one per column:
     (\"extra\" . :null))
    ...)
 
-The =column_name= and =column_type= fields are always populated.
+The `column_name' and `column_type' fields are always populated.
 Other fields may be :null depending on SOURCE type; database tables
-with constraints populate =key= and =default=.
+with constraints populate `key' and `default'.
 
-Signals `user-error' for DDL statements (CREATE, INSERT, DROP, etc.)
+Signal `user-error' for DDL statements (CREATE, INSERT, DROP, etc.)
 which cannot be described directly.  Create the table first, then
 describe it by name.
 
-Uses `duckdb-query-default-database' when SOURCE is a table name.
+Use `duckdb-query-default-database' when SOURCE is a table name.
 
 Example:
 
@@ -280,7 +280,7 @@ Also see `duckdb-query-column-types' for name-to-type mapping."
 SOURCE can be table name, file path, URL, or SELECT query.
 ARGS are passed to `duckdb-query-describe'.
 
-Returns list of column name strings.
+Return list of column name strings.
 
 Example:
 
@@ -301,7 +301,7 @@ Also see `duckdb-query-column-types' for name-to-type mapping."
 SOURCE can be table name, file path, URL, or SELECT query.
 ARGS are passed to `duckdb-query-describe'.
 
-Returns alist of (NAME . TYPE) pairs where NAME is column name
+Return alist of (NAME . TYPE) pairs where NAME is column name
 string and TYPE is DuckDB type string.
 
 Example:
@@ -328,7 +328,7 @@ by explicit :database parameter.
 
 DATABASE is evaluated once and bound dynamically for BODY execution.
 
-Returns value of last form in BODY.
+Return value of last form in BODY.
 
 Example:
 
@@ -346,12 +346,12 @@ Example:
 (defmacro duckdb-with-transient-database (&rest body)
   "Execute BODY with temporary file-based database.
 
-Creates temporary database file, executes BODY with that database as
-default, then deletes the file.  Unlike in-memory databases, temporary
+Create temporary database file, execute BODY with that database as
+default, then delete the file.  Unlike in-memory databases, temporary
 file databases persist across multiple CLI invocations within BODY,
 enabling queries that build on previous results.
 
-Returns value of last form in BODY.
+Return value of last form in BODY.
 
 The temporary database file is deleted even if BODY signals error.
 
@@ -382,11 +382,11 @@ ensures state persists across queries."
 (defun duckdb-query-set-default-database (&optional path)
   "Set default database for `duckdb-query' to PATH.
 
-If PATH is nil or empty string, uses in-memory database.
+If PATH is nil or empty string, use in-memory database.
 
-Returns previous default database.
+Return previous default database.
 
-When called interactively, prompts for database file path.
+When called interactively, prompt for database file path.
 
 Example:
 
@@ -417,10 +417,9 @@ while leveraging the unified conversion layer.
 
 EXECUTOR controls execution strategy:
   :cli       - Direct CLI invocation (default)
-  :session   - Named session (requires session backend)
   function   - Custom executor function
   symbol     - Function name as symbol
-  object     - Custom executor object with methods
+  object     - Custom executor object with `cl-defmethod'
 
 QUERY is SQL string to execute.
 
@@ -430,18 +429,17 @@ executor supports:
   :readonly - Open database read-only
   :timeout  - Execution timeout in seconds
 
-Returns JSON string for parsing by conversion layer.
-Signals error on execution failure.
+Return JSON string for parsing by conversion layer.
+Signal error on execution failure.
 
-To implement a custom executor:
+To implement custom executor, define method with `cl-defmethod':
 
-  (cl-defmethod duckdb-query-execute ((executor my-executor) query &rest args)
-    \"Execute QUERY using my custom backend.\"
-    ;; Your implementation here
-    ;; Must return JSON string
-    )
+  (cl-defmethod duckdb-query-execute ((exec my-type) query &rest args)
+    \"Execute QUERY with custom backend.\"
+    ...)
 
-See Info node `(duckdb-query) Executors' for details."
+Called by `duckdb-query' to delegate execution.
+Also see Info node `(duckdb-query) Executors' for details."
   (error "No executor method defined for %S" executor))
 
 ;;;;; CLI Executor
@@ -457,9 +455,9 @@ PARAMS is plist with keys:
   :separator    - Column separator for CSV mode
   :nullvalue    - String to display for NULL values
 
-Returns list of strings suitable for `call-process' invocation.
+Return list of strings suitable for `call-process' invocation.
 
-Used by `duckdb-query-execute' :cli method to construct command-line
+Used by `duckdb-query-execute' `:cli' method to construct command-line
 arguments from keyword parameters.
 
 Example:
@@ -477,12 +475,12 @@ Example:
         (nullvalue (plist-get params :nullvalue)))
 
     ;; param insertion
-    (when database (push (expand-file-name database) args))   ;; Add database file if specified
-    (when readonly (push "-readonly" args))                   ;; Add readonly flag
-    (when output-mode (push (format "-%s" output-mode) args)) ;; Add output mode
-    (when init-file (push "-init" args) (push (expand-file-name init-file) args)) ;; Add init file
-    (when separator (push "-separator" args) (push separator args))               ;; Add separator
-    (when nullvalue (push "-nullvalue" args) (push nullvalue args))               ;; Add nullvalue
+    (when database (push (expand-file-name database) args))
+    (when readonly (push "-readonly" args))
+    (when output-mode (push (format "-%s" output-mode) args))
+    (when init-file (push "-init" args) (push (expand-file-name init-file) args))
+    (when separator (push "-separator" args) (push separator args))
+    (when nullvalue (push "-nullvalue" args) (push nullvalue args))
 
     (nreverse args)))
 
@@ -494,13 +492,13 @@ CLI-ARGS is list of command-line arguments from
 QUERY is SQL string to execute.
 TIMEOUT is execution timeout in seconds (currently unused).
 
-Returns output string on success.
-Signals error with DuckDB's message on failure.
+Return output string on success.
+Signal error with DuckDB's message on failure.
 
-Uses `call-process' for subprocess invocation.
-Sets DUCKDB_NO_COLOR environment variable to disable color codes.
+Use `call-process' for subprocess invocation.
+Set DUCKDB_NO_COLOR environment variable to disable color codes.
 
-Called by `duckdb-query-execute' :cli method."
+Called by `duckdb-query-execute' `:cli' method."
   (with-temp-buffer
     (let* ((default-directory temporary-file-directory)
            (process-environment (cons "DUCKDB_NO_COLOR=1" process-environment))
@@ -515,7 +513,7 @@ Called by `duckdb-query-execute' :cli method."
                exit-code (string-trim output))))))
 
 (cl-defmethod duckdb-query-execute ((_executor (eql :cli)) query &rest args)
-  "Run QUERY with EXECUTOR via DuckDB CLI with enhanced parameter support.
+  "Execute QUERY via DuckDB CLI with ARGS parameters.
 
 Supported ARGS:
   :database     - Database file path (nil for in-memory)
@@ -526,16 +524,15 @@ Supported ARGS:
   :separator    - Column separator for CSV mode
   :nullvalue    - String to display for NULL values
 
-Returns JSON string from DuckDB output.
-Signals error on non-zero exit code.
+Return JSON string from DuckDB output.
+Signal error on non-zero exit code.
 
-Uses `duckdb-query--build-cli-args' to construct command-line arguments.
-Uses `duckdb-query--invoke-cli' for subprocess invocation.
-Uses `duckdb-query-executable' and `duckdb-query-default-timeout'."
+Use `duckdb-query--build-cli-args' to construct command-line arguments.
+Use `duckdb-query--invoke-cli' for subprocess invocation.
+Use `duckdb-query-executable' and `duckdb-query-default-timeout'."
   (let* ((database (plist-get args :database))
          (readonly (if (plist-member args :readonly)
                        (plist-get args :readonly)
-                     ;; Default to readonly when database specified
                      (and database t)))
          (timeout (or (plist-get args :timeout)
                       duckdb-query-default-timeout))
@@ -564,6 +561,9 @@ This enables custom execution strategies without defining new executor
 types.  The function receives QUERY as first argument followed by all
 ARGS as keyword parameters.
 
+Return JSON string from executor function.
+Signal error if executor function signals error.
+
 Example:
 
   (defun my-executor (query &rest args)
@@ -571,28 +571,25 @@ Example:
       ;; Custom execution logic
       ...))
 
-  (duckdb-query \"SELECT 1\" :executor #\\='my-executor :database \"test.db\")
-
-Returns JSON string from executor function.
-Signals error if executor function signals error."
+  (duckdb-query \"SELECT 1\" :executor #\\='my-executor :database \"test.db\")"
   (apply executor query args))
 
 (cl-defmethod duckdb-query-execute ((executor symbol) query &rest args)
   "Execute QUERY by calling function named by EXECUTOR symbol.
 
-EXECUTOR must be a symbol naming a function that accepts (query &rest args)
+EXECUTOR must be symbol naming function that accepts (query &rest args)
 and returns JSON string.
 
 This handles the case where users pass function names as symbols rather
 than function objects.
 
+Return JSON string from executor function.
+Signal error if EXECUTOR is not a function or if function signals error.
+
 Example:
 
   (duckdb-query \"SELECT 1\" :executor \\='my-executor)
-  (duckdb-query \"SELECT 1\" :executor #\\='my-executor)
-
-Returns JSON string from executor function.
-Signals error if EXECUTOR is not a function or if function signals error."
+  (duckdb-query \"SELECT 1\" :executor #\\='my-executor)"
   (unless (fboundp executor)
     (error "Symbol %S is not a function" executor))
   (apply executor query args))
@@ -601,17 +598,18 @@ Signals error if EXECUTOR is not a function or if function signals error."
 (defun duckdb-query-execute-raw (query &optional database _timeout)
   "Execute QUERY via DuckDB CLI and return raw JSON string.
 
-This is the low-level execution primitive used by the `:cli' executor.
-Most code should use `duckdb-query' or `duckdb-query-execute' instead.
+This is the low-level execution primitive.  Most code should use
+`duckdb-query' or `duckdb-query-execute' instead.
 
 QUERY is SQL string.
 DATABASE is optional path to database file; nil uses in-memory.
-_TIMEOUT is reserved for future use; currently ignored.
+TIMEOUT is reserved for future use; currently ignored.
 
-Returns raw JSON output string for parsing.
-Signals error on non-zero exit code.
+Return raw JSON output string for parsing.
+Signal error on non-zero exit code.
 
-Uses `duckdb-query-executable' for subprocess invocation."
+Use `duckdb-query-executable' for subprocess invocation.
+Wrapped by `duckdb-query-execute' `:cli' method."
   (with-temp-buffer
     (let* ((cmd (if database
                     (list duckdb-query-executable database "-json" "-c" query)
@@ -632,10 +630,10 @@ Uses `duckdb-query-executable' for subprocess invocation."
 
 ROWS is list of alists from JSON parsing.
 
-Returns alist of (COLUMN-NAME . VECTOR) pairs where each vector
+Return alist of (COLUMN-NAME . VECTOR) pairs where each vector
 contains all values for that column.
 
-Uses hash table for O(1) column lookup and single-pass algorithm
+Use hash table for O(1) column lookup and single-pass algorithm
 to minimize cache misses.
 
 Called by `duckdb-query' when FORMAT is `:columnar'."
@@ -673,11 +671,11 @@ Called by `duckdb-query' when FORMAT is `:columnar'."
 
 ROWS is list of alists from JSON parsing.
 
-Returns list of lists: first row is headers, remaining rows are values.
+Return list of lists: first row is headers, remaining rows are values.
 Each row is a list of column values in consistent order, with native
 Lisp types (numbers, strings, symbols).
 
-Uses hash table for O(1) column lookup and minimizes allocations.
+Use hash table for O(1) column lookup and minimize allocations.
 
 Called by `duckdb-query' when FORMAT is `:org-table'."
   (when rows
@@ -842,11 +840,11 @@ DATABASE is optional database file path (nil for in-memory).
 READONLY defaults to t when DATABASE specified.
 FORMAT is output structure (:alist, :columnar, :org-table, etc.).
 
-Returns converted results in specified FORMAT.
-Returns nil for empty results.
-Returns raw output string for non-JSON results.
+Return converted results in specified FORMAT.
+Return nil for empty results.
+Return raw output string for non-JSON results.
 
-Uses `duckdb-query' with SQL read from FILE.
+Use `duckdb-query' with SQL read from FILE.
 
 Example:
   (duckdb-query-file \"queries/analysis.sql\"
