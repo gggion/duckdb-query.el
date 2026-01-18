@@ -71,7 +71,7 @@
 ;;;; Customization
 
 (defgroup duckdb-query nil
-  "Execute DuckDB queries with transducers."
+  "Execute DuckDB queries and parse results into elisp data structures."
   :group 'data
   :prefix "duckdb-query-")
 
@@ -80,14 +80,16 @@
 
 Used by `duckdb-query-execute-raw' and the `:cli' executor method."
   :type 'string
-  :group 'duckdb-query)
+  :group 'duckdb-query
+  :package-version '(duckdb-query . "0.1.0"))
 
 (defcustom duckdb-query-default-timeout 30
   "Default timeout in seconds for query execution.
 
 Used by `:cli' executor when :timeout argument is nil."
   :type 'integer
-  :group 'duckdb-query)
+  :group 'duckdb-query
+  :package-version '(duckdb-query . "0.1.0"))
 
 (defcustom duckdb-query-null-value :null
   "Value representing SQL NULL in query results.
@@ -96,7 +98,8 @@ Used when parsing JSON output from DuckDB."
   :type '(choice (const :tag "Keyword :null" :null)
                  (const :tag "Symbol nil" nil)
                  (const :tag "String \"NULL\"" "NULL"))
-  :group 'duckdb-query)
+  :group 'duckdb-query
+  :package-version '(duckdb-query . "0.1.0"))
 
 (defcustom duckdb-query-false-value :false
   "Value representing SQL FALSE in query results.
@@ -104,7 +107,8 @@ Used when parsing JSON output from DuckDB."
 Used when parsing JSON output from DuckDB."
   :type '(choice (const :tag "Keyword :false" :false)
                  (const :tag "Symbol nil" nil))
-  :group 'duckdb-query)
+  :group 'duckdb-query
+  :package-version '(duckdb-query . "0.1.0"))
 
 ;;;; Internal Variables
 
