@@ -716,6 +716,7 @@ FORMAT is output structure, one of:
   :vector    - vector of alists
   :columnar  - alist of column vectors
   :org-table - list of lists for `org-mode' tables
+  :raw       - unprocessed output string from executor
 
 EXECUTOR controls execution strategy:
   :cli      - Direct CLI invocation (default)
@@ -727,13 +728,14 @@ Additional keyword arguments in ARGS are passed to EXECUTOR.
 The :cli executor supports:
   :readonly     - Open database read-only (default t when :database provided)
   :output-mode  - DuckDB output mode (default \\='json)
+                  Non-JSON modes (csv, box, table, markdown, etc.) require
+                  :format :raw; other formats signal error on non-JSON input.
   :init-file    - SQL file to execute before query
   :separator    - Column separator for CSV mode
   :nullvalue    - String to display for NULL values
 
 Returns nil for empty results.
 Returns converted data in FORMAT for successful queries.
-Returns raw output string for non-JSON results (errors, non-tabular output).
 
 Execution is delegated to `duckdb-query-execute' generic function,
 enabling pluggable backends.  JSON parsing uses `json-parse-string'
@@ -748,7 +750,7 @@ Examples:
 
   ;; Default: in-memory database, alist format
   (duckdb-query \"SELECT 42 as answer\")
-  ;; => ((((\"answer\" . 42))))
+  ;; => (((answer . 42)))
 
   ;; Query database file
   (duckdb-query \"SELECT * FROM users\" :database \"app.db\")
@@ -759,7 +761,11 @@ Examples:
 
   ;; Columnar format for analysis
   (duckdb-query \"SELECT * FROM data.csv\" :format :columnar)
-  ;; => ((\"id\" . [1 2 3]) (\"name\" . [\"Alice\" \"Bob\" \"Carol\"]))
+  ;; => ((id . [1 2 3]) (name . [\"Alice\" \"Bob\" \"Carol\"]))
+
+  ;; Raw box output for display
+  (duckdb-query \"SELECT * FROM users\" :format :raw :output-mode \\='box)
+  ;; => \"┌────┬───────┐\\n│ id │ name  │\\n...\"
 
   ;; Custom executor
   (duckdb-query \"SELECT 1\" :executor #\\='my-custom-executor)
@@ -769,61 +775,57 @@ Examples:
                 :database \"app.db\"
                 :init-file \"setup.sql\")"
   (let* ((db (or database duckdb-query-default-database))
-         (json-output (apply #'duckdb-query-execute
-                             executor
-                             query
-                             :database db
-                             :timeout timeout
-                             args)))
-    (when (and json-output (not (string-empty-p (string-trim json-output))))
-      (condition-case nil
-          ;; Try to parse as JSON with format-specific parameters
-          (pcase format
-            (:alist
-             (json-parse-string json-output
-                                :object-type 'alist
-                                :array-type 'list
-                                :null-object duckdb-query-null-value
-                                :false-object duckdb-query-false-value))
-            (:plist
-             (json-parse-string json-output
-                                :object-type 'plist
-                                :array-type 'list
-                                :null-object duckdb-query-null-value
-                                :false-object duckdb-query-false-value))
-            (:hash
-             (json-parse-string json-output
-                                :object-type 'hash-table
-                                :array-type 'list
-                                :null-object duckdb-query-null-value
-                                :false-object duckdb-query-false-value))
-            (:vector
-             (json-parse-string json-output
-                                :object-type 'alist
-                                :array-type 'array
-                                :null-object duckdb-query-null-value
-                                :false-object duckdb-query-false-value))
-            (:columnar
-             (duckdb-query--to-columnar
-              (json-parse-string json-output
-                                 :object-type 'alist
-                                 :array-type 'list
-                                 :null-object duckdb-query-null-value
-                                 :false-object duckdb-query-false-value)))
-            (:org-table
-             (duckdb-query--to-org-table
-              (json-parse-string json-output
-                                 :object-type 'alist
-                                 :array-type 'list
-                                 :null-object duckdb-query-null-value
-                                 :false-object duckdb-query-false-value)))
-            (_
-             (error "Unknown format: %s.  Valid: :alist :plist :hash :vector :columnar :org-table"
-                    format)))
-        (json-parse-error
-         ;; Not JSON or malformed - return raw output
-         ;; This handles: errors, non-tabular results, etc.
-         json-output)))))
+         (output (apply #'duckdb-query-execute
+                        executor
+                        query
+                        :database db
+                        :timeout timeout
+                        args)))
+    (when (and output (not (string-empty-p (string-trim output))))
+      (pcase format
+        (:raw
+         output)
+        (:alist
+         (json-parse-string output
+                            :object-type 'alist
+                            :array-type 'list
+                            :null-object duckdb-query-null-value
+                            :false-object duckdb-query-false-value))
+        (:plist
+         (json-parse-string output
+                            :object-type 'plist
+                            :array-type 'list
+                            :null-object duckdb-query-null-value
+                            :false-object duckdb-query-false-value))
+        (:hash
+         (json-parse-string output
+                            :object-type 'hash-table
+                            :array-type 'list
+                            :null-object duckdb-query-null-value
+                            :false-object duckdb-query-false-value))
+        (:vector
+         (json-parse-string output
+                            :object-type 'alist
+                            :array-type 'array
+                            :null-object duckdb-query-null-value
+                            :false-object duckdb-query-false-value))
+        (:columnar
+         (duckdb-query--to-columnar
+          (json-parse-string output
+                             :object-type 'alist
+                             :array-type 'list
+                             :null-object duckdb-query-null-value
+                             :false-object duckdb-query-false-value)))
+        (:org-table
+         (duckdb-query--to-org-table
+          (json-parse-string output
+                             :object-type 'alist
+                             :array-type 'list
+                             :null-object duckdb-query-null-value
+                             :false-object duckdb-query-false-value)))
+        (_
+         (error "Unknown format: %s.  Valid: :alist :plist :hash :vector :columnar :org-table :raw"
+                format))))))
 
 (cl-defun duckdb-query-file (file &key database readonly (format :alist))
   "Execute SQL from FILE and return results in FORMAT.
