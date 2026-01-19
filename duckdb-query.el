@@ -207,21 +207,23 @@ SOURCE can be:
 - Table name: \"users\"
 - File path: \"/path/to/data.parquet\" or \"~/data.csv\"
 - Remote URL: \"https://example.com/data.csv\"
+- Cloud storage: \"s3://bucket/data.parquet\"
 - SELECT query: \"SELECT * FROM users WHERE active\"
+- CTE query: \"WITH cte AS (...) SELECT ...\"
 
 ARGS are passed to `duckdb-query'.
 
-For SELECT queries, wrap SOURCE in DESCRIBE(...).
+For SELECT and WITH queries, wrap SOURCE in DESCRIBE(...).
 For tables, files, and URLs, use DESCRIBE directly.
 
 Return list of alists, one per column:
 
-  (((\"column_name\" . \"id\")
-    (\"column_type\" . \"INTEGER\")
-    (\"null\" . \"YES\")
-    (\"key\" . :null)
-    (\"default\" . :null)
-    (\"extra\" . :null))
+  (((column_name . \"id\")
+    (column_type . \"INTEGER\")
+    (null . \"YES\")
+    (key . :null)
+    (default . :null)
+    (extra . :null))
    ...)
 
 The `column_name' and `column_type' fields are always populated.
@@ -243,23 +245,25 @@ Example:
 Also see `duckdb-query-columns' to extract column names.
 Also see `duckdb-query-column-types' for name-to-type mapping."
   (let* ((source-trimmed (string-trim source))
+         (source-upper (upcase source-trimmed))
          (query
           (cond
-           ;; File path (absolute, home-relative, or relative with extension)
+           ;; File path (absolute, home-relative, or with data file extension)
            ((or (string-prefix-p "/" source-trimmed)
                 (string-prefix-p "~" source-trimmed)
-                (string-match-p "\\.\\(parquet\\|csv\\|json\\)\\'" source-trimmed))
+                (string-match-p "\\.\\(parquet\\|csv\\|json\\|jsonl\\|ndjson\\)\\(?:\\.gz\\)?\\'"
+                                source-trimmed))
             (format "DESCRIBE '%s'" source-trimmed))
-           ;; Remote URL
-           ((string-match-p "\\`https?://" source-trimmed)
+           ;; Remote URL (http, https, s3, gs, az, hf)
+           ((string-match-p "\\`\\(https?\\|s3\\|gs\\|az\\|hf\\)://" source-trimmed)
             (format "DESCRIBE '%s'" source-trimmed))
-           ;; SELECT query - wrap in DESCRIBE(...)
-           ((string-match-p "\\`SELECT\\b" source-trimmed)
+           ;; SELECT or WITH query - wrap in DESCRIBE(...)
+           ((string-match-p "\\`\\(SELECT\\|WITH\\)\\b" source-upper)
             (format "DESCRIBE (%s)" source-trimmed))
            ;; DDL - reject with guidance
            ((string-match-p
-             "\\`\\(CREATE\\|INSERT\\|UPDATE\\|DELETE\\|DROP\\|ALTER\\)\\b"
-             source-trimmed)
+             "\\`\\(CREATE\\|INSERT\\|UPDATE\\|DELETE\\|DROP\\|ALTER\\|TRUNCATE\\)\\b"
+             source-upper)
             (user-error
              "Cannot describe DDL statement; create table first, then describe by name"))
            ;; Assume table name
