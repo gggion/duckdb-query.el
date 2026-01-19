@@ -691,6 +691,154 @@ Called by `duckdb-query' when FORMAT is `:org-table'."
                                    (aset row-vec idx (cdr cell))))
                                (append row-vec nil)))))))
 
+
+(defun duckdb-query-org-table-to-alist (org-table)
+  "Convert ORG-TABLE to list of alists.
+
+ORG-TABLE is list of lists where first row is headers and
+remaining rows are data values (as returned by `duckdb-query'
+with :format :org-table).
+
+Return list of alists suitable for use with `duckdb-query' :data
+parameter.
+
+Example:
+  (duckdb-query-org-table-to-alist
+   \\='((id name) (1 \"Alice\") (2 \"Bob\")))
+  ;; => (((id . 1) (name . \"Alice\"))
+  ;;     ((id . 2) (name . \"Bob\")))"
+  (let ((headers (car org-table)))
+    (cl-loop for row in (cdr org-table)
+             collect (cl-loop for h in headers
+                              for v in row
+                              collect (cons h v)))))
+
+(defun duckdb-query--alist-to-csv-file (alist-data file)
+  "Write ALIST-DATA directly to FILE as CSV.
+
+ALIST-DATA is list of alists where each alist represents a row
+and each cons cell is (column . value).
+
+FILE is path to write CSV output.
+
+Writes directly to file buffer, avoiding intermediate string
+allocation.  Handles RFC 4180 CSV escaping: strings containing
+commas, quotes, or newlines are quoted with doubled internal
+quotes.
+
+Called by `duckdb-query--substitute-data-refs' for data
+serialization."
+  (with-temp-file file
+    (let ((headers (mapcar #'car (car alist-data))))
+      ;; Header row
+      (insert (mapconcat #'symbol-name headers ",") "\n")
+      ;; Data rows
+      (dolist (row alist-data)
+        (insert
+         (mapconcat
+          (lambda (cell)
+            (let ((v (cdr cell)))
+              (cond
+               ((stringp v)
+                (if (string-match-p "[,\"\n]" v)
+                    (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" v))
+                  v))
+               ((null v) "")
+               (t (prin1-to-string v)))))
+          row ",")
+         "\n")))))
+
+(defun duckdb-query--substitute-data-refs (query data temp-files)
+  "Replace @SYMBOL references in QUERY with temp file paths.
+
+DATA is the :data parameter in one of these forms:
+  - List of alists: bound to @data implicitly
+  - Alist of (SYMBOL . VALUE) pairs: symbols become @symbol references
+
+Values must be actual alist data, not symbols to be evaluated.
+Use backquote with comma to pass lexical variables:
+
+  (let ((my-data \\='(((id . 1)))))
+    (duckdb-query \"SELECT * FROM @data\" :data \\=`((data . ,my-data))))
+
+TEMP-FILES is hash table mapping symbols to temp file paths for
+cleanup tracking.
+
+Return modified query string.
+
+Examples:
+  Single source (implicit @data):
+    :data \\='(((id . 1) (name . \"Alice\")))
+    :data my-variable  ; when my-variable holds list of alists
+
+  Named bindings with backquote:
+    :data \\=`((orders . ,my-orders-var))
+    :data \\=`((orders . ,orders) (users . ,users))
+
+  Inline data:
+    :data \\='((orders . (((id . 1) (product . \"Widget\")))))
+
+Called by `duckdb-query' when DATA parameter is provided.
+Uses `duckdb-query--alist-to-csv-file' for serialization."
+  (let ((result query)
+        (bindings
+         (cond
+          ;; nil -> no bindings
+          ((null data)
+           nil)
+
+          ;; Direct data: list of alists -> bind to 'data
+          ;; Detect by checking if first element looks like a row (alist)
+          ;; rather than a binding (symbol . list-of-alists)
+          ;;
+          ;; Direct data example: (((id . 1) (name . "Alice")) ((id . 2) ...))
+          ;;   (car data) = ((id . 1) (name . "Alice"))  ; a row/alist
+          ;;   (caar data) = (id . 1)                    ; first cell of row
+          ;;   (caaar data) = id                         ; column name symbol
+          ;;
+          ;; Binding example: ((orders . (((id . 1) ...))))
+          ;;   (car data) = (orders . (((id . 1) ...)))  ; a binding
+          ;;   (caar data) = orders                      ; binding name symbol
+          ;;
+          ;; Key distinction: for direct data, (caar data) is a CONS CELL (column . value)
+          ;; For bindings, (caar data) is a SYMBOL (the binding name)
+          ((and (listp data)
+                (listp (car data))
+                (consp (caar data)))  ; First element's car is cons = it's a row
+           `((data . ,data)))
+
+          ;; List of bindings: each should be (symbol . alist-data)
+          (t
+           (mapcar
+            (lambda (binding)
+              (pcase binding
+                ;; Cons cell (sym . value) where value is list of alists
+                (`(,(and sym (pred symbolp))
+                   . ,(and value
+                           (pred listp)
+                           (pred (lambda (v)
+                                   (and v
+                                        (listp (car v))
+                                        (consp (caar v)))))))
+                 (cons sym value))
+                (_
+                 (error "Invalid data binding: %S.  Expected (symbol . alist-data); use backquote: \\=`((sym . ,var))" binding))))
+            data)))))
+
+    ;; Substitute each binding
+    (pcase-dolist (`(,sym . ,alist-data) bindings)
+      (let* ((pattern (format "@%s\\b" (regexp-quote (symbol-name sym))))
+             (temp-file (make-temp-file
+                         (format "duckdb-data-%s-" sym)
+                         nil ".csv")))
+        (duckdb-query--alist-to-csv-file alist-data temp-file)
+        (puthash sym temp-file temp-files)
+        (setq result (replace-regexp-in-string
+                      pattern
+                      (format "'%s'" temp-file)
+                      result t t))))
+    result))
+
 ;;;; Main Entry Point
 
 (cl-defun duckdb-query (query &rest args &key
@@ -698,138 +846,108 @@ Called by `duckdb-query' when FORMAT is `:org-table'."
                               timeout
                               (format :alist)
                               (executor :cli)
+                              data
                               &allow-other-keys)
   "Execute QUERY and return results in FORMAT.
 
-This is the main entry point for executing DuckDB queries and converting
-results to Elisp data structures.
+QUERY is SQL string.  May contain @SYMBOL references when DATA provided.
 
-QUERY is SQL string to execute.
+DATABASE defaults to `duckdb-query-default-database'.
+TIMEOUT defaults to `duckdb-query-default-timeout'.
 
-DATABASE is optional database file path.  When nil, uses
-`duckdb-query-default-database' if set, otherwise uses in-memory
-transient database.
+FORMAT is output structure:
+  :alist, :plist, :hash, :vector, :columnar, :org-table, :raw
 
-TIMEOUT is optional execution timeout in seconds.  Defaults to
-`duckdb-query-default-timeout'.
+EXECUTOR controls execution: :cli (default), function, or custom object.
+See `duckdb-query-execute' for extension points.
 
-FORMAT is output structure, one of:
-  :alist     - list of alists (default)
-  :plist     - list of plists
-  :hash      - list of hash-tables
-  :vector    - vector of alists
-  :columnar  - alist of column vectors
-  :org-table - list of lists for `org-mode' tables
-  :raw       - unprocessed output string from executor
-
-EXECUTOR controls execution strategy:
-  :cli      - Direct CLI invocation (default)
-  function  - Custom executor function
-  symbol    - Function name as symbol
-  object    - Custom executor object
+DATA enables @SYMBOL references to Elisp data.  Use backquote for
+lexical variables.  See `duckdb-query--substitute-data-refs' for
+binding forms and examples.
 
 Additional keyword arguments in ARGS are passed to EXECUTOR.
-The :cli executor supports:
-  :readonly     - Open database read-only (default t when :database provided)
-  :output-mode  - DuckDB output mode (default \\='json)
-                  Non-JSON modes (csv, box, table, markdown, etc.) require
-                  :format :raw; other formats signal error on non-JSON input.
-  :init-file    - SQL file to execute before query
-  :separator    - Column separator for CSV mode
-  :nullvalue    - String to display for NULL values
 
-Returns nil for empty results.
-Returns converted data in FORMAT for successful queries.
-
-Execution is delegated to `duckdb-query-execute' generic function,
-enabling pluggable backends.  JSON parsing uses `json-parse-string'
-with format-specific :object-type parameter for efficient conversion.
-
-Uses `duckdb-query-null-value' and `duckdb-query-false-value'
-for null/false representation.
-Uses `duckdb-query--to-columnar' for columnar conversion.
-Uses `duckdb-query--to-org-table' for org-table conversion.
+Returns converted results or nil for empty results.
 
 Examples:
 
-  ;; Default: in-memory database, alist format
   (duckdb-query \"SELECT 42 as answer\")
   ;; => (((answer . 42)))
 
-  ;; Query database file
-  (duckdb-query \"SELECT * FROM users\" :database \"app.db\")
+  (let ((users \\='(((id . 1) (name . \"Alice\")))))
+    (duckdb-query \"SELECT * FROM @data\" :data users))
+  ;; => (((id . 1) (name . \"Alice\")))
 
-  ;; Use default database
-  (setq duckdb-query-default-database \"app.db\")
-  (duckdb-query \"SELECT * FROM users\")
-
-  ;; Columnar format for analysis
-  (duckdb-query \"SELECT * FROM data.csv\" :format :columnar)
-  ;; => ((id . [1 2 3]) (name . [\"Alice\" \"Bob\" \"Carol\"]))
-
-  ;; Raw box output for display
-  (duckdb-query \"SELECT * FROM users\" :format :raw :output-mode \\='box)
-  ;; => \"┌────┬───────┐\\n│ id │ name  │\\n...\"
-
-  ;; Custom executor
-  (duckdb-query \"SELECT 1\" :executor #\\='my-custom-executor)
-
-  ;; With init file
-  (duckdb-query \"SELECT * FROM test\"
-                :database \"app.db\"
-                :init-file \"setup.sql\")"
-  (let* ((db (or database duckdb-query-default-database))
-         (output (apply #'duckdb-query-execute
-                        executor
-                        query
-                        :database db
-                        :timeout timeout
-                        args)))
-    (when (and output (not (string-empty-p (string-trim output))))
-      (pcase format
-        (:raw
-         output)
-        (:alist
-         (json-parse-string output
-                            :object-type 'alist
-                            :array-type 'list
-                            :null-object duckdb-query-null-value
-                            :false-object duckdb-query-false-value))
-        (:plist
-         (json-parse-string output
-                            :object-type 'plist
-                            :array-type 'list
-                            :null-object duckdb-query-null-value
-                            :false-object duckdb-query-false-value))
-        (:hash
-         (json-parse-string output
-                            :object-type 'hash-table
-                            :array-type 'list
-                            :null-object duckdb-query-null-value
-                            :false-object duckdb-query-false-value))
-        (:vector
-         (json-parse-string output
-                            :object-type 'alist
-                            :array-type 'array
-                            :null-object duckdb-query-null-value
-                            :false-object duckdb-query-false-value))
-        (:columnar
-         (duckdb-query--to-columnar
-          (json-parse-string output
-                             :object-type 'alist
-                             :array-type 'list
-                             :null-object duckdb-query-null-value
-                             :false-object duckdb-query-false-value)))
-        (:org-table
-         (duckdb-query--to-org-table
-          (json-parse-string output
-                             :object-type 'alist
-                             :array-type 'list
-                             :null-object duckdb-query-null-value
-                             :false-object duckdb-query-false-value)))
-        (_
-         (error "Unknown format: %s.  Valid: :alist :plist :hash :vector :columnar :org-table :raw"
-                format))))))
+  (duckdb-query \"SELECT * FROM @orders\"
+                :data \\=`((orders . ,my-orders)))"
+  (let* ((temp-files (make-hash-table :test 'eq))
+         (processed-query (if data
+                              (duckdb-query--substitute-data-refs
+                               query data temp-files)
+                            query))
+         (db (or database duckdb-query-default-database))
+         (clean-args (cl-loop for (k v) on args by #'cddr
+                              unless (eq k :data)
+                              append (list k v)))
+         (output nil))
+    (unwind-protect
+        (progn
+          (setq output (apply #'duckdb-query-execute
+                              executor
+                              processed-query
+                              :database db
+                              :timeout timeout
+                              clean-args))
+          (when (and output (not (string-empty-p (string-trim output))))
+            (pcase format
+              (:raw
+               output)
+              (:alist
+               (json-parse-string output
+                                  :object-type 'alist
+                                  :array-type 'list
+                                  :null-object duckdb-query-null-value
+                                  :false-object duckdb-query-false-value))
+              (:plist
+               (json-parse-string output
+                                  :object-type 'plist
+                                  :array-type 'list
+                                  :null-object duckdb-query-null-value
+                                  :false-object duckdb-query-false-value))
+              (:hash
+               (json-parse-string output
+                                  :object-type 'hash-table
+                                  :array-type 'list
+                                  :null-object duckdb-query-null-value
+                                  :false-object duckdb-query-false-value))
+              (:vector
+               (json-parse-string output
+                                  :object-type 'alist
+                                  :array-type 'array
+                                  :null-object duckdb-query-null-value
+                                  :false-object duckdb-query-false-value))
+              (:columnar
+               (duckdb-query--to-columnar
+                (json-parse-string output
+                                   :object-type 'alist
+                                   :array-type 'list
+                                   :null-object duckdb-query-null-value
+                                   :false-object duckdb-query-false-value)))
+              (:org-table
+               (duckdb-query--to-org-table
+                (json-parse-string output
+                                   :object-type 'alist
+                                   :array-type 'list
+                                   :null-object duckdb-query-null-value
+                                   :false-object duckdb-query-false-value)))
+              (_
+               (error "Unknown format: %s.  Valid: :alist :plist :hash :vector :columnar :org-table :raw"
+                      format)))))
+      ;; Cleanup temp files
+      (maphash (lambda (_sym file)
+                 (when (file-exists-p file)
+                   (delete-file file)))
+               temp-files))))
 
 (cl-defun duckdb-query-file (file &key database readonly (format :alist))
   "Execute SQL from FILE and return results in FORMAT.
