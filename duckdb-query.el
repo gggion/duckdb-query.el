@@ -525,7 +525,7 @@ Wraps QUERY in COPY statement writing to temporary JSON file.
 Uses `-bail' flag to stop on first error and `-f' to execute from file.
 
 Returns JSON string on success.
-Signals `duckdb-copy-failed' on failure with error output for fallback handling.
+Signals `duckdb-query-copy-failed' on failure with error output for fallback handling.
 
 The COPY wrapper places QUERY on separate line so parser errors
 reference the user's SQL without showing COPY scaffolding.
@@ -559,7 +559,7 @@ Called by `duckdb-query-execute' `:cli' method when file output is viable."
                     (insert-file-contents json-file)
                     (buffer-string))
                 ;; Failure: signal for fallback to pipe mode
-                (signal 'duckdb-copy-failed (list error-output))))))
+                (signal 'duckdb-query-copy-failed (list error-output))))))
       ;; Cleanup temp files
       (when (file-exists-p sql-file) (delete-file sql-file))
       (when (file-exists-p json-file) (delete-file json-file)))))
@@ -617,9 +617,9 @@ Signal error on execution failure after fallback."
                           :nullvalue nullvalue)))
           (duckdb-query--invoke-cli pipe-args query timeout))
       ;; File mode (default): try COPY, fallback to pipe on failure
-      (condition-case err
+      (condition-case nil
           (duckdb-query--invoke-cli-file cli-args query timeout)
-        (duckdb-copy-failed
+        (duckdb-query-copy-failed
          ;; Fallback to pipe mode for DDL/DML/DESCRIBE
          (let ((pipe-args (duckdb-query--build-cli-args
                            :database database
@@ -1363,3 +1363,4 @@ Example:
 (provide 'duckdb-query)
 
 ;;; duckdb-query.el ends here
+
