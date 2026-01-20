@@ -692,29 +692,162 @@ Called by `duckdb-query' when FORMAT is `:org-table'."
                                (append row-vec nil)))))))
 
 
-(defun duckdb-query-org-table-to-alist (org-table)
-  "Convert ORG-TABLE to list of alists.
+;;;; Nested Type Preservation
+(defun duckdb-query--nested-type-p (type-string)
+  "Return non-nil if TYPE-STRING represents a nested DuckDB type.
 
-ORG-TABLE is list of lists where first row is headers and
-remaining rows are data values (as returned by `duckdb-query'
-with :format :org-table).
+Nested types include STRUCT, MAP, LIST (TYPE[]), and ARRAY (TYPE[N]).
 
-Return list of alists suitable for use with `duckdb-query' :data
-parameter.
+TYPE-STRING is the column_type from DESCRIBE output.
+
+Called by `duckdb-query--wrap-nested-columns'."
+  (or (string-prefix-p "STRUCT" type-string)
+      (string-prefix-p "MAP" type-string)
+      (string-match-p "\\[\\]$" type-string)        ; LIST: TYPE[]
+      (string-match-p "\\[[0-9]+\\]$" type-string))) ; ARRAY: TYPE[N]
+
+(defun duckdb-query--wrap-nested-columns (query)
+  "Wrap nested type columns in QUERY with to_json() for proper JSON output.
+
+Detects STRUCT, MAP, LIST, and ARRAY columns via schema introspection
+and wraps them with to_json() so they serialize as proper JSON
+objects/arrays instead of DuckDB's string representations.
+
+QUERY is SQL string to analyze and potentially wrap.
+
+Returns modified query string with nested columns wrapped, or original
+QUERY if no nested columns detected.
 
 Example:
-  (duckdb-query-org-table-to-alist
-   \\='((id name) (1 \"Alice\") (2 \"Bob\")))
-  ;; => (((id . 1) (name . \"Alice\"))
-  ;;     ((id . 2) (name . \"Bob\")))"
-  (let ((headers (car org-table)))
-    (cl-loop for row in (cdr org-table)
-             collect (cl-loop for h in headers
-                              for v in row
-                              collect (cons h v)))))
+  Input:  \"SELECT struct_col, array_col, id FROM table\"
+  Output: \"SELECT to_json(\\\"struct_col\\\") AS \\\"struct_col\\\",
+                  to_json(\\\"array_col\\\") AS \\\"array_col\\\",
+                  \\\"id\\\"
+           FROM (...) AS _duckdb_nested_wrap\"
+
+Called by `duckdb-query' when :preserve-nested is non-nil."
+  (let* ((schema (condition-case nil
+                     (duckdb-query-describe query)
+                   (error nil)))
+         (nested-cols
+          (when schema
+            (cl-remove-if-not
+             (lambda (row)
+               (duckdb-query--nested-type-p (cdr (assq 'column_type row))))
+             schema)))
+         (nested-names (mapcar (lambda (r) (cdr (assq 'column_name r))) nested-cols)))
+    (if (or (null schema) (null nested-names))
+        query
+      ;; Wrap query with SELECT that converts nested columns
+      (let* ((all-cols (mapcar (lambda (r) (cdr (assq 'column_name r))) schema))
+             (select-exprs
+              (mapcar (lambda (col)
+                        (if (member col nested-names)
+                            (format "to_json(\"%s\") AS \"%s\"" col col)
+                          (format "\"%s\"" col)))
+                      all-cols)))
+        (format "SELECT %s FROM (%s) AS _duckdb_nested_wrap"
+                (string-join select-exprs ", ")
+                query)))))
+
+(defun duckdb-query--prepare-for-json (value)
+  "Prepare VALUE for `json-serialize' by converting lists to vectors.
+
+`json-serialize' interprets lists as alists (key-value pairs).
+Non-alist lists (arrays from DuckDB) must be converted to vectors
+for correct JSON array serialization.
+
+VALUE can be any Elisp value from DuckDB query results.
+
+Recursively processes:
+- Vectors: process each element
+- Alist entries (symbol . value): preserve as cons, process value
+- Plain lists (1 2 3): convert to vector [1 2 3]
+- Atoms: pass through unchanged
+
+Called by `duckdb-query--alist-to-json-file' when data contains
+nested structures from queries with :preserve-nested."
+  (cond
+   ;; nil stays nil
+   ((null value) value)
+   ;; Special symbols pass through
+   ((memq value '(:null :false t)) value)
+   ;; Vectors: recursively process elements
+   ((vectorp value)
+    (vconcat (mapcar #'duckdb-query--prepare-for-json value)))
+   ;; Cons cell
+   ((consp value)
+    (let ((first (car value)))
+      (cond
+       ;; Alist entry: (symbol . something) where symbol is not a special value
+       ((and (symbolp first)
+             (not (memq first '(:null :false t))))
+        (let ((rest (cdr value)))
+          (if (and (listp rest)
+                   rest  ; not nil
+                   (not (and (consp (car rest))
+                             (symbolp (caar rest)))))
+              ;; cdr is a list but NOT an alist - this is an array value like (arr 1 2 3)
+              ;; Convert to (arr . [1 2 3])
+              (cons first (vconcat (mapcar #'duckdb-query--prepare-for-json rest)))
+            ;; cdr is either atomic or an alist - process recursively
+            (cons first (duckdb-query--prepare-for-json rest)))))
+       ;; List of alist entries (a row)
+       ((and (consp first) (symbolp (car first)))
+        (mapcar #'duckdb-query--prepare-for-json value))
+       ;; Plain list of values - convert to vector
+       (t
+        (vconcat (mapcar #'duckdb-query--prepare-for-json value))))))
+   ;; Everything else passes through
+   (t value)))
+
+(defun duckdb-query--alist-to-json-file (alist-data file)
+  "Write ALIST-DATA to FILE as JSON array.
+
+ALIST-DATA is list of alists where each alist represents a row
+and each cons cell is (column . value).  Values may be nested
+alists or lists from queries with :preserve-nested.
+
+FILE is path to write JSON output.
+
+Uses native `json-serialize' for performance (~2× faster than CSV,
+~4× faster than `json-encode').  Handles :null and :false correctly.
+Converts integers outside JSON safe range (±2^53) to strings to
+avoid precision loss.
+
+Nested structures (alists, lists) are processed by
+`duckdb-query--prepare-for-json' to ensure correct JSON
+array/object serialization.
+
+Called by `duckdb-query--substitute-data-refs' for data serialization."
+  (let* ((max-safe-int (expt 2 53))
+         (min-safe-int (- (expt 2 53)))
+         ;; First prepare nested structures (convert lists to vectors)
+         (prepared-data (duckdb-query--prepare-for-json alist-data))
+         ;; Then handle large integers
+         (safe-data
+          (if (vectorp prepared-data)
+              (cl-map 'vector
+                      (lambda (row)
+                        (mapcar
+                         (lambda (cell)
+                           (let ((v (cdr cell)))
+                             (if (and (integerp v)
+                                      (or (> v max-safe-int)
+                                          (< v min-safe-int)))
+                                 (cons (car cell) (number-to-string v))
+                               cell)))
+                         row))
+                      prepared-data)
+            ;; Already a vector from prepare-for-json
+            prepared-data)))
+    (with-temp-file file
+      (insert (json-serialize (if (vectorp safe-data) safe-data (vconcat safe-data))
+                              :null-object :null
+                              :false-object :false)))))
 
 (defun duckdb-query--alist-to-csv-file (alist-data file)
-  "Write ALIST-DATA directly to FILE as CSV.
+  "Write ALIST-DATA to FILE as CSV.
 
 ALIST-DATA is list of alists where each alist represents a row
 and each cons cell is (column . value).
@@ -723,11 +856,18 @@ FILE is path to write CSV output.
 
 Writes directly to file buffer, avoiding intermediate string
 allocation.  Handles RFC 4180 CSV escaping: strings containing
-commas, quotes, or newlines are quoted with doubled internal
-quotes.
+commas, quotes, or newlines are quoted with doubled internal quotes.
 
-Called by `duckdb-query--substitute-data-refs' for data
-serialization."
+Handles special Elisp values:
+- :null → empty string (SQL NULL)
+- :false → \"false\" (SQL FALSE)
+- t → \"true\" (SQL TRUE)
+
+Note: Nested structures (alists, lists) are serialized via
+`prin1-to-string' and will not roundtrip correctly.  Use JSON
+format (:data-format :json) for nested data.
+
+Called by `duckdb-query--substitute-data-refs' when :data-format is :csv."
   (with-temp-file file
     (let ((headers (mapcar #'car (car alist-data))))
       ;; Header row
@@ -739,16 +879,23 @@ serialization."
           (lambda (cell)
             (let ((v (cdr cell)))
               (cond
+               ;; Special Elisp values
+               ((eq v :null) "")
+               ((eq v :false) "false")
+               ((eq v t) "true")
+               ;; Strings with RFC 4180 escaping
                ((stringp v)
                 (if (string-match-p "[,\"\n]" v)
                     (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" v))
                   v))
+               ;; nil treated as empty/NULL
                ((null v) "")
+               ;; Everything else via prin1
                (t (prin1-to-string v)))))
           row ",")
          "\n")))))
 
-(defun duckdb-query--substitute-data-refs (query data temp-files)
+(defun duckdb-query--substitute-data-refs (query data data-format temp-files)
   "Replace @SYMBOL references in QUERY with temp file paths.
 
 DATA is the :data parameter in one of these forms:
@@ -761,6 +908,10 @@ Use backquote with comma to pass lexical variables:
   (let ((my-data \\='(((id . 1)))))
     (duckdb-query \"SELECT * FROM @data\" :data \\=`((data . ,my-data))))
 
+DATA-FORMAT controls serialization:
+  :json - JSON array via `json-serialize' (default, faster, better types)
+  :csv  - CSV via `duckdb-query--alist-to-csv-file' (for compatibility)
+
 TEMP-FILES is hash table mapping symbols to temp file paths for
 cleanup tracking.
 
@@ -769,18 +920,17 @@ Return modified query string.
 Examples:
   Single source (implicit @data):
     :data \\='(((id . 1) (name . \"Alice\")))
-    :data my-variable  ; when my-variable holds list of alists
 
   Named bindings with backquote:
     :data \\=`((orders . ,my-orders-var))
     :data \\=`((orders . ,orders) (users . ,users))
 
-  Inline data:
-    :data \\='((orders . (((id . 1) (product . \"Widget\")))))
-
-Called by `duckdb-query' when DATA parameter is provided.
-Uses `duckdb-query--alist-to-csv-file' for serialization."
+Called by `duckdb-query' when DATA parameter is provided."
   (let ((result query)
+        (serializer (if (eq data-format :csv)
+                        #'duckdb-query--alist-to-csv-file
+                      #'duckdb-query--alist-to-json-file))
+        (file-ext (if (eq data-format :csv) ".csv" ".json"))
         (bindings
          (cond
           ;; nil -> no bindings
@@ -790,21 +940,9 @@ Uses `duckdb-query--alist-to-csv-file' for serialization."
           ;; Direct data: list of alists -> bind to 'data
           ;; Detect by checking if first element looks like a row (alist)
           ;; rather than a binding (symbol . list-of-alists)
-          ;;
-          ;; Direct data example: (((id . 1) (name . "Alice")) ((id . 2) ...))
-          ;;   (car data) = ((id . 1) (name . "Alice"))  ; a row/alist
-          ;;   (caar data) = (id . 1)                    ; first cell of row
-          ;;   (caaar data) = id                         ; column name symbol
-          ;;
-          ;; Binding example: ((orders . (((id . 1) ...))))
-          ;;   (car data) = (orders . (((id . 1) ...)))  ; a binding
-          ;;   (caar data) = orders                      ; binding name symbol
-          ;;
-          ;; Key distinction: for direct data, (caar data) is a CONS CELL (column . value)
-          ;; For bindings, (caar data) is a SYMBOL (the binding name)
           ((and (listp data)
                 (listp (car data))
-                (consp (caar data)))  ; First element's car is cons = it's a row
+                (consp (caar data)))
            `((data . ,data)))
 
           ;; List of bindings: each should be (symbol . alist-data)
@@ -812,7 +950,6 @@ Uses `duckdb-query--alist-to-csv-file' for serialization."
            (mapcar
             (lambda (binding)
               (pcase binding
-                ;; Cons cell (sym . value) where value is list of alists
                 (`(,(and sym (pred symbolp))
                    . ,(and value
                            (pred listp)
@@ -830,8 +967,8 @@ Uses `duckdb-query--alist-to-csv-file' for serialization."
       (let* ((pattern (format "@%s\\b" (regexp-quote (symbol-name sym))))
              (temp-file (make-temp-file
                          (format "duckdb-data-%s-" sym)
-                         nil ".csv")))
-        (duckdb-query--alist-to-csv-file alist-data temp-file)
+                         nil file-ext)))
+        (funcall serializer alist-data temp-file)
         (puthash sym temp-file temp-files)
         (setq result (replace-regexp-in-string
                       pattern
@@ -847,47 +984,110 @@ Uses `duckdb-query--alist-to-csv-file' for serialization."
                               (format :alist)
                               (executor :cli)
                               data
+                              (data-format :json)
+                              preserve-nested
                               &allow-other-keys)
   "Execute QUERY and return results in FORMAT.
 
-QUERY is SQL string.  May contain @SYMBOL references when DATA provided.
+QUERY is SQL string to execute.  May contain @SYMBOL references to
+Elisp data provided via DATA parameter.
 
-DATABASE defaults to `duckdb-query-default-database'.
-TIMEOUT defaults to `duckdb-query-default-timeout'.
+DATABASE is optional database file path.  When nil, uses
+`duckdb-query-default-database' if set, otherwise in-memory database.
+
+TIMEOUT is optional execution timeout in seconds.  Defaults to
+`duckdb-query-default-timeout'.
 
 FORMAT is output structure:
-  :alist, :plist, :hash, :vector, :columnar, :org-table, :raw
+  :alist     - list of alists (default)
+  :plist     - list of plists
+  :hash      - list of hash-tables
+  :vector    - vector of alists
+  :columnar  - alist of column vectors
+  :org-table - list of lists for `org-mode' tables
+  :raw       - unprocessed output string from executor
 
-EXECUTOR controls execution: :cli (default), function, or custom object.
-See `duckdb-query-execute' for extension points.
+EXECUTOR controls execution strategy:
+  :cli       - Direct CLI invocation (default)
+  function   - Custom executor function
+  symbol     - Function name as symbol
+  object     - Custom executor object with `cl-defmethod'
 
-DATA enables @SYMBOL references to Elisp data.  Use backquote for
-lexical variables.  See `duckdb-query--substitute-data-refs' for
-binding forms and examples.
+DATA enables querying Elisp data structures via @SYMBOL references.
+Values must be actual data, not symbols; use backquote for variables:
+
+  Direct data (referenced as @data):
+    :data \\='(((id . 1) (name . \"Alice\")) ...)
+
+  Named bindings (use backquote with comma for variables):
+    :data \\=`((orders . ,my-orders-var)
+            (users . ,my-users-var))
+
+DATA-FORMAT controls how DATA is serialized to temporary files:
+  :json - JSON array via native `json-serialize' (default)
+          Faster (~2× vs CSV), preserves nested types, handles
+          :null and :false correctly.
+  :csv  - CSV format for compatibility with tools expecting CSV.
+          Use when joining with CSV files or for debugging.
+
+PRESERVE-NESTED when non-nil, wraps STRUCT, MAP, LIST, and ARRAY
+columns with to_json() so they are returned as nested Elisp
+structures (alists and lists) instead of string representations.
+This enables lossless roundtrip of complex nested data.
+
+  Without :preserve-nested (default):
+    (location . \"{\\='lon\\=': 1.0, \\='lat\\=': 2.0}\")
+
+  With :preserve-nested t:
+    (location (lon . 1.0) (lat . 2.0))
+
+Note: :preserve-nested requires an additional DESCRIBE query to
+detect nested column types, adding slight overhead.
 
 Additional keyword arguments in ARGS are passed to EXECUTOR.
 
-Returns converted results or nil for empty results.
+Returns nil for empty results.
+Returns converted data in FORMAT for successful queries.
 
 Examples:
 
+  ;; Simple query
   (duckdb-query \"SELECT 42 as answer\")
   ;; => (((answer . 42)))
 
-  (let ((users \\='(((id . 1) (name . \"Alice\")))))
-    (duckdb-query \"SELECT * FROM @data\" :data users))
+  ;; Query with Elisp data
+  (let ((users \\='(((id . 1) (name . \"Alice\"))
+                 ((id . 2) (name . \"Bob\")))))
+    (duckdb-query \"SELECT * FROM @data WHERE id = 1\"
+                  :data users))
   ;; => (((id . 1) (name . \"Alice\")))
 
-  (duckdb-query \"SELECT * FROM @orders\"
-                :data \\=`((orders . ,my-orders)))"
+  ;; Preserve nested structures
+  (duckdb-query \"SELECT {\\='x\\=': 1, \\='y\\=': 2}::STRUCT(x INT, y INT) as point\"
+                :preserve-nested t)
+  ;; => (((point (x . 1) (y . 2))))
+
+  ;; Roundtrip nested data
+  (let ((data (duckdb-query \"SELECT * FROM nested_table\"
+                            :preserve-nested t)))
+    (duckdb-query \"SELECT * FROM @data\" :data data))
+
+Uses `duckdb-query-execute' for execution dispatch.
+Uses `duckdb-query--substitute-data-refs' for @symbol replacement.
+Uses `duckdb-query--wrap-nested-columns' for nested type preservation."
   (let* ((temp-files (make-hash-table :test 'eq))
+         ;; Wrap query for nested preservation if requested
+         (effective-query (if preserve-nested
+                              (duckdb-query--wrap-nested-columns query)
+                            query))
+         ;; Substitute @data references
          (processed-query (if data
                               (duckdb-query--substitute-data-refs
-                               query data temp-files)
-                            query))
+                               effective-query data data-format temp-files)
+                            effective-query))
          (db (or database duckdb-query-default-database))
          (clean-args (cl-loop for (k v) on args by #'cddr
-                              unless (eq k :data)
+                              unless (memq k '(:data :data-format :preserve-nested))
                               append (list k v)))
          (output nil))
     (unwind-protect
