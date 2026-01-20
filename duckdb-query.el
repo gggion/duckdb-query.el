@@ -1162,6 +1162,7 @@ Called by `duckdb-query' when DATA parameter is provided."
                               timeout
                               (format :alist)
                               (executor :cli)
+                              (output-via :file)
                               data
                               (data-format :json)
                               preserve-nested
@@ -1192,6 +1193,15 @@ EXECUTOR controls execution strategy:
   symbol     - Function name as symbol
   object     - Custom executor object with `cl-defmethod'
 
+OUTPUT-VIA controls how results are transferred from DuckDB:
+  :file      - Write to temp file via COPY (default, ~8x faster for
+               large results, nested types serialize correctly)
+  :pipe      - Stream through stdout pipe (required for DDL/DML,
+               use with :preserve-nested for nested types)
+
+When OUTPUT-VIA is `:file' and QUERY cannot be wrapped in COPY
+\(DDL, DML, DESCRIBE statements), automatically falls back to `:pipe'.
+
 DATA enables querying Elisp data structures via @SYMBOL references.
 Values must be actual data, not symbols; use backquote for variables:
 
@@ -1209,19 +1219,13 @@ DATA-FORMAT controls how DATA is serialized to temporary files:
   :csv  - CSV format for compatibility with tools expecting CSV.
           Use when joining with CSV files or for debugging.
 
-PRESERVE-NESTED when non-nil, wraps STRUCT, MAP, LIST, and ARRAY
-columns with to_json() so they are returned as nested Elisp
-structures (alists and lists) instead of string representations.
-This enables lossless roundtrip of complex nested data.
+PRESERVE-NESTED when non-nil and OUTPUT-VIA is `:pipe', wraps STRUCT,
+MAP, LIST, and ARRAY columns with to_json() so they return as nested
+Elisp structures instead of string representations.
 
-  Without :preserve-nested (default):
-    (location . \"{\\='lon\\=': 1.0, \\='lat\\=': 2.0}\")
-
-  With :preserve-nested t:
-    (location (lon . 1.0) (lat . 2.0))
-
-Note: :preserve-nested requires an additional DESCRIBE query to
-detect nested column types, adding slight overhead.
+When OUTPUT-VIA is `:file' (the default), nested types serialize
+correctly without this parameter.  PRESERVE-NESTED is only needed
+when explicitly using `:output-via :pipe'.
 
 Additional keyword arguments in ARGS are passed to EXECUTOR.
 
@@ -1232,36 +1236,27 @@ QUERY may contain @org:NAME references to named org tables in current
 buffer, resolved via `org-babel-ref-resolve'.  Use @org:FILE:NAME for
 tables in other files.
 
-  (duckdb-query \"SELECT * FROM @org:my-table WHERE x > 10\")
-  (duckdb-query \"SELECT * FROM @org:other.org:their-table\")
-
 Examples:
 
-  ;; Simple query
+  ;; Simple query (uses fast file output by default)
   (duckdb-query \"SELECT 42 as answer\")
   ;; => (((answer . 42)))
 
-  ;; Query with Elisp data
-  (let ((users \\='(((id . 1) (name . \"Alice\"))
-                 ((id . 2) (name . \"Bob\")))))
-    (duckdb-query \"SELECT * FROM @data WHERE id = 1\"
-                  :data users))
-  ;; => (((id . 1) (name . \"Alice\")))
-
-  ;; Preserve nested structures
-  (duckdb-query \"SELECT {\\='x\\=': 1, \\='y\\=': 2}::STRUCT(x INT, y INT) as point\"
-                :preserve-nested t)
+  ;; Nested types work automatically with file output
+  (duckdb-query \"SELECT {'x': 1, 'y': 2}::STRUCT(x INT, y INT) as point\")
   ;; => (((point (x . 1) (y . 2))))
 
-  ;; Roundtrip nested data
-  (let ((data (duckdb-query \"SELECT * FROM nested_table\"
-                            :preserve-nested t)))
-    (duckdb-query \"SELECT * FROM @data\" :data data))
+  ;; DDL falls back to pipe automatically
+  (duckdb-query \"CREATE TABLE test (id INT)\" :readonly nil)
 
+  ;; Explicit pipe mode with preserve-nested
+  (duckdb-query \"SELECT * FROM nested_table\"
+                :output-via :pipe
+                :preserve-nested t)
 
 Uses `duckdb-query-execute' for execution dispatch.
 Uses `duckdb-query--substitute-data-refs' for @symbol replacement.
-Uses `duckdb-query--wrap-nested-columns' for nested type preservation."
+Uses `duckdb-query--substitute-org-refs' for @org: replacement."
   (let* ((temp-files (make-hash-table :test 'eq))
          ;; First: resolve @org: references
          (org-resolved-query (duckdb-query--substitute-org-refs query temp-files))
@@ -1270,8 +1265,8 @@ Uses `duckdb-query--wrap-nested-columns' for nested type preservation."
                                 (duckdb-query--substitute-data-refs
                                  org-resolved-query data data-format temp-files)
                               org-resolved-query))
-         ;; Then: wrap for nested preservation
-         (effective-query (if preserve-nested
+         ;; Then: wrap for nested preservation (only for pipe mode)
+         (effective-query (if (and preserve-nested (eq output-via :pipe))
                               (duckdb-query--wrap-nested-columns substituted-query)
                             substituted-query))
          (db (or database duckdb-query-default-database))
@@ -1286,6 +1281,7 @@ Uses `duckdb-query--wrap-nested-columns' for nested type preservation."
                               effective-query
                               :database db
                               :timeout timeout
+                              :output-via output-via
                               clean-args))
           (when (and output (not (string-empty-p (string-trim output))))
             (pcase format
