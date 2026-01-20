@@ -1332,13 +1332,14 @@ Uses `duckdb-query--substitute-org-refs' for @org: replacement."
                    (delete-file file)))
                temp-files))))
 
-(cl-defun duckdb-query-file (file &key database readonly (format :alist))
+(cl-defun duckdb-query-file (file &key database readonly (format :alist) (output-via :file))
   "Execute SQL from FILE and return results in FORMAT.
 
 FILE is path to SQL file containing query.
 DATABASE is optional database file path (nil for in-memory).
 READONLY defaults to t when DATABASE specified.
 FORMAT is output structure (:alist, :columnar, :org-table, etc.).
+OUTPUT-VIA is output strategy (:file or :pipe), defaults to :file.
 
 Return converted results in specified FORMAT.
 Return nil for empty results.
@@ -1356,7 +1357,8 @@ Example:
     (duckdb-query sql
                   :database database
                   :readonly readonly
-                  :format format)))
+                  :format format
+                  :output-via output-via)))
 
 (provide 'duckdb-query)
 
