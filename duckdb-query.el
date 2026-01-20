@@ -403,6 +403,10 @@ Example:
               (expand-file-name path)
             nil))))
 
+(define-error 'duckdb-copy-failed
+  "DuckDB COPY strategy failed, fallback to pipe required"
+  'error)
+
 ;;;; Executor Protocol
 ;;;;; Generic Function
 
@@ -1282,3 +1286,4 @@ Example:
 (provide 'duckdb-query)
 
 ;;; duckdb-query.el ends here
+
