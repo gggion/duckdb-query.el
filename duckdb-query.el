@@ -60,6 +60,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'ob-ref)
 
 ;;;; Customization
 
@@ -719,6 +720,74 @@ Also see `duckdb-query' with :format :org-table."
               (cl-mapcar #'cons headers row))
             (cdr org-table))))
 
+(defun duckdb-query--resolve-org-ref (ref-string)
+  "Resolve @org:NAME or @org:FILE:NAME reference to alist data.
+
+REF-STRING is the reference without @org: prefix.
+Returns alist data suitable for serialization.
+
+Examples:
+  \"my-table\" - resolve named table in current buffer
+  \"path/to/file.org:my-table\" - resolve table in specific file
+
+Uses `org-babel-ref-resolve' for table lookup.
+Uses `duckdb-query-org-table-to-alist' for format conversion.
+Called by `duckdb-query--substitute-org-refs'."
+  (let* ((parts (split-string ref-string ":"))
+         (name (car (last parts)))
+         (file (when (> (length parts) 1)
+                 (string-join (butlast parts) ":"))))
+    (save-excursion
+      (save-restriction
+        (widen)
+        (when file
+          (let ((buf (find-file-noselect (expand-file-name file))))
+            (set-buffer buf)))
+        (let ((table-data (condition-case err
+                              (org-babel-ref-resolve name)
+                            (error
+                             (error "Could not resolve org reference `%s': %s"
+                                    ref-string (error-message-string err))))))
+          (if (and (listp table-data)
+                   (listp (car table-data))
+                   (not (null table-data)))
+              ;; Filter out hline symbols before conversion
+              (let ((clean-table (cl-remove-if (lambda (row) (eq row 'hline))
+                                               table-data)))
+                (duckdb-query-org-table-to-alist clean-table))
+            (error "Reference `%s' did not resolve to table data (got %S)"
+                   ref-string (type-of table-data))))))))
+
+
+(defun duckdb-query--substitute-org-refs (query temp-files)
+  "Replace @org:NAME references in QUERY with temp file paths.
+
+QUERY is SQL string potentially containing @org:NAME references.
+TEMP-FILES is hash table for cleanup tracking.
+
+Returns modified query string with @org: references replaced.
+
+Uses `duckdb-query--resolve-org-ref' for reference resolution.
+Uses `duckdb-query--alist-to-json-file' for serialization.
+Called by `duckdb-query'."
+  (let ((result query)
+        (org-ref-pattern "@org:\\([^ \t\n,)]+\\)"))
+    (while (string-match org-ref-pattern result)
+      (let* ((ref-string (match-string 1 result))
+             (match-start (match-beginning 0))
+             (match-end (match-end 0))
+             (alist-data (duckdb-query--resolve-org-ref ref-string))
+             (temp-file (make-temp-file
+                         (format "duckdb-org-%s-"
+                                 (replace-regexp-in-string "[/:]" "_" ref-string))
+                         nil ".json")))
+        (duckdb-query--alist-to-json-file alist-data temp-file)
+        (puthash (intern (concat "org:" ref-string)) temp-file temp-files)
+        (setq result (concat (substring result 0 match-start)
+                             (format "'%s'" temp-file)
+                             (substring result match-end)))))
+    result))
+
 ;;;; Nested Type Preservation
 (defun duckdb-query--nested-type-p (type-string)
   "Return non-nil if TYPE-STRING represents a nested DuckDB type.
@@ -1076,6 +1145,13 @@ Additional keyword arguments in ARGS are passed to EXECUTOR.
 Returns nil for empty results.
 Returns converted data in FORMAT for successful queries.
 
+QUERY may contain @org:NAME references to named org tables in current
+buffer, resolved via `org-babel-ref-resolve'.  Use @org:FILE:NAME for
+tables in other files.
+
+  (duckdb-query \"SELECT * FROM @org:my-table WHERE x > 10\")
+  (duckdb-query \"SELECT * FROM @org:other.org:their-table\")
+
 Examples:
 
   ;; Simple query
@@ -1099,16 +1175,19 @@ Examples:
                             :preserve-nested t)))
     (duckdb-query \"SELECT * FROM @data\" :data data))
 
+
 Uses `duckdb-query-execute' for execution dispatch.
 Uses `duckdb-query--substitute-data-refs' for @symbol replacement.
 Uses `duckdb-query--wrap-nested-columns' for nested type preservation."
   (let* ((temp-files (make-hash-table :test 'eq))
-         ;; Substitute @data references first so temp files exist
+         ;; First: resolve @org: references
+         (org-resolved-query (duckdb-query--substitute-org-refs query temp-files))
+         ;; Then: substitute @data references
          (substituted-query (if data
                                 (duckdb-query--substitute-data-refs
-                                 query data data-format temp-files)
-                              query))
-         ;; Then wrap for nested preservation (DESCRIBE can now read temp files)
+                                 org-resolved-query data data-format temp-files)
+                              org-resolved-query))
+         ;; Then: wrap for nested preservation
          (effective-query (if preserve-nested
                               (duckdb-query--wrap-nested-columns substituted-query)
                             substituted-query))
@@ -1127,8 +1206,7 @@ Uses `duckdb-query--wrap-nested-columns' for nested type preservation."
                               clean-args))
           (when (and output (not (string-empty-p (string-trim output))))
             (pcase format
-              (:raw
-               output)
+              (:raw output)
               (:alist
                (json-parse-string output
                                   :object-type 'alist
@@ -1168,8 +1246,7 @@ Uses `duckdb-query--wrap-nested-columns' for nested type preservation."
                                    :null-object duckdb-query-null-value
                                    :false-object duckdb-query-false-value)))
               (_
-               (error "Unknown format: %s.  Valid: :alist :plist :hash :vector :columnar :org-table :raw"
-                      format)))))
+               (error "Unknown format: %s.  Valid: :alist :plist :hash :vector :columnar :org-table :raw" format)))))
       ;; Cleanup temp files
       (maphash (lambda (_sym file)
                  (when (file-exists-p file)
