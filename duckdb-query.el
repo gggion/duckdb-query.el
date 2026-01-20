@@ -1076,15 +1076,15 @@ Uses `duckdb-query-execute' for execution dispatch.
 Uses `duckdb-query--substitute-data-refs' for @symbol replacement.
 Uses `duckdb-query--wrap-nested-columns' for nested type preservation."
   (let* ((temp-files (make-hash-table :test 'eq))
-         ;; Wrap query for nested preservation if requested
+         ;; Substitute @data references first so temp files exist
+         (substituted-query (if data
+                                (duckdb-query--substitute-data-refs
+                                 query data data-format temp-files)
+                              query))
+         ;; Then wrap for nested preservation (DESCRIBE can now read temp files)
          (effective-query (if preserve-nested
-                              (duckdb-query--wrap-nested-columns query)
-                            query))
-         ;; Substitute @data references
-         (processed-query (if data
-                              (duckdb-query--substitute-data-refs
-                               effective-query data data-format temp-files)
-                            effective-query))
+                              (duckdb-query--wrap-nested-columns substituted-query)
+                            substituted-query))
          (db (or database duckdb-query-default-database))
          (clean-args (cl-loop for (k v) on args by #'cddr
                               unless (memq k '(:data :data-format :preserve-nested))
@@ -1094,7 +1094,7 @@ Uses `duckdb-query--wrap-nested-columns' for nested type preservation."
         (progn
           (setq output (apply #'duckdb-query-execute
                               executor
-                              processed-query
+                              effective-query
                               :database db
                               :timeout timeout
                               clean-args))
