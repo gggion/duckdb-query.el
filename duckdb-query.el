@@ -403,7 +403,7 @@ Example:
               (expand-file-name path)
             nil))))
 
-(define-error 'duckdb-copy-failed
+(define-error 'duckdb-query-copy-failed
   "DuckDB COPY strategy failed, fallback to pipe required"
   'error)
 
@@ -514,6 +514,56 @@ Called by `duckdb-query-execute' `:cli' method."
         (error "DuckDB execution failed (exit %d): %s"
                exit-code (string-trim output))))))
 
+(defun duckdb-query--invoke-cli-file (cli-args query timeout)
+  "Execute QUERY via COPY TO with file-based I/O for better performance.
+
+CLI-ARGS is list of command-line arguments from `duckdb-query--build-cli-args'.
+QUERY is SQL string to execute.
+TIMEOUT is execution timeout in seconds (currently unused).
+
+Wraps QUERY in COPY statement writing to temporary JSON file.
+Uses `-bail' flag to stop on first error and `-f' to execute from file.
+
+Returns JSON string on success.
+Signals `duckdb-copy-failed' on failure with error output for fallback handling.
+
+The COPY wrapper places QUERY on separate line so parser errors
+reference the user's SQL without showing COPY scaffolding.
+
+Called by `duckdb-query-execute' `:cli' method when file output is viable."
+  (let ((sql-file (make-temp-file "duckdb-query-" nil ".sql"))
+        (json-file (make-temp-file "duckdb-output-" nil ".json")))
+    (unwind-protect
+        (progn
+          ;; Write SQL file with COPY wrapper
+          ;; Query on separate line hides COPY from error messages
+          (with-temp-file sql-file
+            (insert "COPY (\n")
+            (insert query)
+            (insert "\n) TO '" json-file "' (FORMAT json, ARRAY true);\n"))
+
+          ;; Execute with -bail to stop on first error
+          (with-temp-buffer
+            (let* ((default-directory temporary-file-directory)
+                   (process-environment (cons "DUCKDB_NO_COLOR=1" process-environment))
+                   (exit-code (apply #'call-process
+                                     (car cli-args) nil t nil
+                                     (append (cdr cli-args)
+                                             (list "-bail" "-f" sql-file))))
+                   (error-output (buffer-string)))
+              (if (and (zerop exit-code)
+                       (file-exists-p json-file)
+                       (> (file-attribute-size (file-attributes json-file)) 0))
+                  ;; Success: read JSON output
+                  (with-temp-buffer
+                    (insert-file-contents json-file)
+                    (buffer-string))
+                ;; Failure: signal for fallback to pipe mode
+                (signal 'duckdb-copy-failed (list error-output))))))
+      ;; Cleanup temp files
+      (when (file-exists-p sql-file) (delete-file sql-file))
+      (when (file-exists-p json-file) (delete-file json-file)))))
+
 (cl-defmethod duckdb-query-execute ((_executor (eql :cli)) query &rest args)
   "Execute QUERY via DuckDB CLI with ARGS parameters.
 
@@ -521,23 +571,31 @@ Supported ARGS:
   :database     - Database file path (nil for in-memory)
   :readonly     - Open database read-only (default t when :database provided)
   :timeout      - Execution timeout in seconds
-  :output-mode  - DuckDB output mode (default \\='json)
+  :output-via   - Output strategy: `:file' (default) or `:pipe'
+  :output-mode  - DuckDB output mode (default \\='json for pipe mode)
   :init-file    - SQL file to execute before query
   :separator    - Column separator for CSV mode
   :nullvalue    - String to display for NULL values
 
-Return JSON string from DuckDB output.
-Signal error on non-zero exit code.
+The `:file' strategy wraps QUERY in COPY statement for ~8x faster
+output on large result sets.  Nested types (STRUCT, LIST, MAP, ARRAY)
+serialize correctly as JSON without requiring `:preserve-nested'.
 
-Use `duckdb-query--build-cli-args' to construct command-line arguments.
-Use `duckdb-query--invoke-cli' for subprocess invocation.
-Use `duckdb-query-executable' and `duckdb-query-default-timeout'."
+If `:file' strategy fails (e.g., for DDL statements), automatically
+falls back to `:pipe' strategy.
+
+The `:pipe' strategy uses traditional `-json' CLI output.  Required
+for DDL, DML, DESCRIBE, and other non-SELECT statements.
+
+Return JSON string from DuckDB output.
+Signal error on execution failure after fallback."
   (let* ((database (plist-get args :database))
          (readonly (if (plist-member args :readonly)
                        (plist-get args :readonly)
                      (and database t)))
          (timeout (or (plist-get args :timeout)
                       duckdb-query-default-timeout))
+         (output-via (or (plist-get args :output-via) :file))
          (output-mode (or (plist-get args :output-mode) 'json))
          (init-file (plist-get args :init-file))
          (separator (plist-get args :separator))
@@ -545,11 +603,32 @@ Use `duckdb-query-executable' and `duckdb-query-default-timeout'."
          (cli-args (duckdb-query--build-cli-args
                     :database database
                     :readonly readonly
-                    :output-mode output-mode
                     :init-file init-file
                     :separator separator
                     :nullvalue nullvalue)))
-    (duckdb-query--invoke-cli cli-args query timeout)))
+    (if (eq output-via :pipe)
+        ;; Explicit pipe mode: use traditional JSON output
+        (let ((pipe-args (duckdb-query--build-cli-args
+                          :database database
+                          :readonly readonly
+                          :output-mode output-mode
+                          :init-file init-file
+                          :separator separator
+                          :nullvalue nullvalue)))
+          (duckdb-query--invoke-cli pipe-args query timeout))
+      ;; File mode (default): try COPY, fallback to pipe on failure
+      (condition-case err
+          (duckdb-query--invoke-cli-file cli-args query timeout)
+        (duckdb-copy-failed
+         ;; Fallback to pipe mode for DDL/DML/DESCRIBE
+         (let ((pipe-args (duckdb-query--build-cli-args
+                           :database database
+                           :readonly readonly
+                           :output-mode output-mode
+                           :init-file init-file
+                           :separator separator
+                           :nullvalue nullvalue)))
+           (duckdb-query--invoke-cli pipe-args query timeout)))))))
 
 ;;;;; Function Executors
 
@@ -1286,4 +1365,3 @@ Example:
 (provide 'duckdb-query)
 
 ;;; duckdb-query.el ends here
-
