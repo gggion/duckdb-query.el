@@ -691,6 +691,33 @@ Called by `duckdb-query' when FORMAT is `:org-table'."
                                    (aset row-vec idx (cdr cell))))
                                (append row-vec nil)))))))
 
+(defun duckdb-query-org-table-to-alist (org-table)
+  "Convert ORG-TABLE to list of alists for use with :data parameter.
+
+ORG-TABLE is list of lists where first row is headers (symbols or
+strings) and remaining rows are data values.  This is the format
+returned by `duckdb-query' with :format :org-table.
+
+Returns list of alists suitable for `duckdb-query' :data parameter,
+enabling roundtrip workflows where query results become inputs to
+subsequent queries.
+
+Example:
+
+  (duckdb-query-org-table-to-alist
+   \\='((id name score)
+     (1 \"Alice\" 95)
+     (2 \"Bob\" 87)))
+  ;; => (((id . 1) (name . \"Alice\") (score . 95))
+  ;;     ((id . 2) (name . \"Bob\") (score . 87)))
+
+Also see `duckdb-query' with :format :org-table."
+  (let ((headers (mapcar (lambda (h)
+                           (if (symbolp h) h (intern h)))
+                         (car org-table))))
+    (mapcar (lambda (row)
+              (cl-mapcar #'cons headers row))
+            (cdr org-table))))
 
 ;;;; Nested Type Preservation
 (defun duckdb-query--nested-type-p (type-string)
