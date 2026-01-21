@@ -514,7 +514,7 @@ Called by `duckdb-query-execute' `:cli' method."
         (error "DuckDB execution failed (exit %d): %s"
                exit-code (string-trim output))))))
 
-(defun duckdb-query--invoke-cli-file (cli-args query timeout)
+(defun duckdb-query--invoke-cli-file (cli-args query _timeout)
   "Execute QUERY via COPY TO with file-based I/O for better performance.
 
 CLI-ARGS is list of command-line arguments from `duckdb-query--build-cli-args'.
@@ -525,7 +525,8 @@ Wraps QUERY in COPY statement writing to temporary JSON file.
 Uses `-bail' flag to stop on first error and `-f' to execute from file.
 
 Returns JSON string on success.
-Signals `duckdb-query-copy-failed' on failure with error output for fallback handling.
+Signals `duckdb-query-copy-failed' on failure with error output for fallback
+handling.
 
 The COPY wrapper places QUERY on separate line so parser errors
 reference the user's SQL without showing COPY scaffolding.
@@ -989,8 +990,8 @@ alists or lists from queries with :preserve-nested.
 
 FILE is path to write JSON output.
 
-Uses native `json-serialize' for performance (~2× faster than CSV,
-~4× faster than `json-encode').  Handles :null and :false correctly.
+Uses native `json-serialize' for performance (~2x faster than CSV,
+~4x faster than `json-encode').  Handles :null and :false correctly.
 Converts integers outside JSON safe range (±2^53) to strings to
 avoid precision loss.
 
@@ -1199,8 +1200,8 @@ OUTPUT-VIA controls how results are transferred from DuckDB:
   :pipe      - Stream through stdout pipe (required for DDL/DML,
                use with :preserve-nested for nested types)
 
-When OUTPUT-VIA is `:file' and QUERY cannot be wrapped in COPY
-\(DDL, DML, DESCRIBE statements), automatically falls back to `:pipe'.
+When OUTPUT-VIA is `:file' and QUERY cannot be wrapped in
+COPY \(DDL, DML,DESCRIBE statements), automatically falls back to `:pipe'.
 
 DATA enables querying Elisp data structures via @SYMBOL references.
 Values must be actual data, not symbols; use backquote for variables:
@@ -1214,7 +1215,7 @@ Values must be actual data, not symbols; use backquote for variables:
 
 DATA-FORMAT controls how DATA is serialized to temporary files:
   :json - JSON array via native `json-serialize' (default)
-          Faster (~2× vs CSV), preserves nested types, handles
+          Faster (~2x vs CSV), preserves nested types, handles
           :null and :false correctly.
   :csv  - CSV format for compatibility with tools expecting CSV.
           Use when joining with CSV files or for debugging.
@@ -1243,8 +1244,8 @@ Examples:
   ;; => (((answer . 42)))
 
   ;; Nested types work automatically with file output
-  (duckdb-query \"SELECT {'x': 1, 'y': 2}::STRUCT(x INT, y INT) as point\")
-  ;; => (((point (x . 1) (y . 2))))
+  (duckdb-query \"SELECT {'x':1,'y':2}::STRUCT(x INT,y INT) as p\")
+  ;; => (((p (x . 1) (y . 2))))
 
   ;; DDL falls back to pipe automatically
   (duckdb-query \"CREATE TABLE test (id INT)\" :readonly nil)
