@@ -1,135 +1,188 @@
-#+TITLE: duckdb-query.el - Native DuckDB Integration for Emacs Lisp
-#+OPTIONS: toc:nil
+#+title: duckdb-query.el - Query Anything, Get Elisp
+#+options: toc:nil
 
-This package executes DuckDB queries and returns results as native Elisp data
-structures. It bridges the gap between SQL analytics and Lisp programming by
-treating query results as first-class Elisp values like alists, plists, vectors,
-or columnar formats ready for immediate programmatic use. The design philosophy
-centers on providing a seamless data ingestion and manipulation workbench: query
-remote Parquet files, join them with org-mode tables in your buffer, filter
-against runtime Elisp variables, and receive either easy to mold elisp data
-structures or formatted drawn table results without parse or serialization
-friction.
+Query remote Parquet files, local CSVs, org-mode tables, and Elisp data
+structures with SQL. Get results as native Elisp values. One function call, no
+intermediate files, no external scripts.
 
-DuckDB itself is an embedded analytical database engine optimized for OLAP
-workloads. It reads Parquet, CSV, and JSON files directly from local paths, HTTP
-URLs, or cloud storage without importing data. This package exposes that
-capability to Elisp with a function call, enabling Emacs to become a legitimate
-data analysis environment. The ~duckdb-query~ function accepts SQL strings and
-keyword parameters controlling output format, data injection, and nested type
-handling. Results flow back as Elisp structures suitable for ~mapcar~,
-~seq-filter~, ~cl-loop~, or insertion into org tables.
+#+begin_html
+<table align="center"><tr>
+    <th width="700px">Query Remote Data, Filter with Elisp, Get Native Structures</th></tr>
+<tr><td>
 
-The package supports multiple data sources in a single query through the ~:data~
-parameter and ~@org:~ table references. Elisp alists become queryable tables via
-~@data~ or named ~@symbol~ bindings. Named org tables in the current buffer
-resolve through ~@org:table-name~ syntax. These sources combine freely with file
-paths and URLs in joins, unions, and subqueries. The result is a unified query
-interface where you can freely manipulate data from wherever, no matter if it's
-a million-row parquet file on S3, a local org-table in a file or an Elisp data
-structure.
+<p><strong>Query joining 336k-row remote Parquet with Elisp alist:</strong></p>
+<pre lang="elisp">(let ((carriers '(((code . "UA") (name . "United Airlines"))
+                  ((code . "AA") (name . "American Airlines"))
+                  ((code . "DL") (name . "Delta Air Lines")))))
+  (duckdb-query
+   "SELECT c.name as airline,
+           {'flights': COUNT(*),
+            'avg_delay': ROUND(AVG(f.arr_delay), 1)} as stats
+    FROM 'https://github.com/rfsaldanha/releases/releases/download/v1/flights.parquet' f
+    JOIN @carriers c ON f.carrier = c.code
+    GROUP BY c.name
+    ORDER BY COUNT(*) DESC"
+   :data `((carriers . ,carriers))
+   :format :columnar))</pre>
 
-* Basic Usage
+<p><strong>Result (columnar format with nested structs):</strong></p>
+<pre lang="elisp">((airline . ["United Airlines" "Delta Air Lines" "American Airlines"])
+ (stats . [((flights . 58665) (avg_delay . 3.6))
+           ((flights . 48110) (avg_delay . 1.6))
+           ((flights . 32729) (avg_delay . 0.4))]))</pre>
+</td></tr></table>
+<p align="center"><em>One function call: remote Parquet + Elisp filter → nested Elisp structures</em></p>
+#+end_html
 
-The ~duckdb-query~ function executes SQL and returns Elisp data:
+DuckDB is an embedded analytical database that reads Parquet, CSV, and JSON
+directly from local paths, HTTP URLs, or cloud storage. This package makes
+DuckDB's capabilities available to Elisp programs. The ~duckdb-query~ function
+executes SQL and returns alists, plists, vectors, or org-table-compatible lists.
+Results are ready for ~mapcar~, ~seq-filter~, ~cl-loop~, or direct insertion
+into buffers.
 
-#+begin_src elisp :results code :exports both
-(duckdb-query "SELECT 42 as answer, 'hello' as greeting")
+The package treats all data sources uniformly. Elisp alists become SQL tables
+via the ~:data~ parameter. Named org tables in your buffer resolve through
+~@org:table-name~ syntax. These combine freely with file paths and URLs in
+joins, unions, and subqueries. A query can join a remote Parquet file with a
+ten-row org table and a runtime Elisp variable, returning the result as an
+alist you can immediately process.
+
+* COMMENT README
+
+#+begin_src elisp :results code
+(let ((carriers '(((code . "UA") (name . "United Airlines"))
+                  ((code . "AA") (name . "American Airlines"))
+                  ((code . "DL") (name . "Delta Air Lines")))))
+  (duckdb-query
+   "SELECT c.name as airline,
+           {'flights': COUNT(*),
+            'avg_delay': ROUND(AVG(f.arr_delay), 1)} as stats
+    FROM 'https://github.com/rfsaldanha/releases/releases/download/v1/flights.parquet' f
+    JOIN @carriers c ON f.carrier = c.code
+    GROUP BY c.name
+    ORDER BY COUNT(*) DESC"
+   :data `((carriers . ,carriers))
+   :format :columnar))
 #+end_src
 
 #+RESULTS:
 #+begin_src elisp
-(((answer . 42) (greeting . "hello")))
+((airline . ["United Airlines" "Delta Air Lines" "American Airlines"])
+ (stats
+  . [((flights . 58665) (avg_delay . 3.6)) ((flights . 48110) (avg_delay . 1.6))
+     ((flights . 32729) (avg_delay . 0.4))]))
 #+end_src
 
-Results default to lists of alists where each alist represents a row. The
-~:format~ parameter selects alternative structures:
+** COMMENT  Quick Examples
 
-#+begin_src elisp :results code :exports both
-;; Columnar format: alist of column vectors
-(duckdb-query "SELECT * FROM range(3) t(i)" :format :columnar)
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-((i . [0 1 2]))
-#+end_src
-
-#+begin_src elisp :results code :exports both
-;; Org-table format: list of lists with header row
-(duckdb-query "SELECT 'Alice' as name, 95 as score
-               UNION ALL SELECT 'Bob', 87"
-              :format :org-table)
+#+begin_src elisp :results code
+(duckdb-query
+ "SELECT 'Alice' as name, 95 as score
+  UNION ALL SELECT 'Bob', 87")
 #+end_src
 
 #+RESULTS:
 #+begin_src elisp
-((name score) ("Alice" 95) ("Bob" 87))
+(((name . "Alice") (score . 95)) ((name . "Bob") (score . 87)))
 #+end_src
 
-DuckDB's file-reading capabilities work directly:
-
-#+begin_src elisp :results code :exports both
-(duckdb-query "SELECT COUNT(*) as trips,
-                      AVG(trip_distance) as avg_dist
-               FROM 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2025-07.parquet'
-               WHERE passenger_count > 0")
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-(((trips . 2839664) (avg_dist . 3.5078284156153217)))
-#+end_src
-
-* Querying Elisp Data
-
-The ~:data~ parameter injects Elisp alists into queries as tables. Singular
-table data binds to ~@data~:
-
-#+begin_src elisp :results code :exports both
-(duckdb-query "SELECT name, score * 1.1 as curved
-               FROM @data
-               WHERE score > 85
-               ORDER BY curved DESC"
-              :data '(((name . "Alice") (score . 95))
-                      ((name . "Bob") (score . 87))
-                      ((name . "Carol") (score . 72))))
+#+begin_src elisp :results code
+(duckdb-query
+ "SELECT * FROM range(1,4) t(n),
+   (SELECT unnest(['a','b']) as letter)"
+ :format :org-table)
 #+end_src
 
 #+RESULTS:
 #+begin_src elisp
-(((name . "Alice") (curved . 104.5)) ((name . "Bob") (curved . 95.7)))
+((n letter) (1 "a") (2 "a") (3 "a") (1 "b") (2 "b") (3 "b"))
 #+end_src
 
-Named bindings enable multiple Elisp sources with explicit symbols. You can also
-backquote syntax to reference lexical variables:
-
-#+begin_src elisp :results code :exports both
-(let ((users '(((id . 1) (name . "Alice"))
-               ((id . 2) (name . "Bob"))))
-      (orders '(((user_id . 1) (product . "Widget") (qty . 3))
-                ((user_id . 2) (product . "Gadget") (qty . 1))
-                ((user_id . 1) (product . "Gizmo") (qty . 2)))))
-  (duckdb-query "SELECT u.name, SUM(o.qty) as total_items
-                 FROM @users u
-                 JOIN @orders o ON u.id = o.user_id
-                 GROUP BY u.name
-                 ORDER BY total_items DESC"
-                :data `((users . ,users)
-                        (orders . ,orders))))
+#+begin_src elisp :results code
+(duckdb-query-value
+ "SELECT COUNT(*) FROM range(1000)")
 #+end_src
 
 #+RESULTS:
 #+begin_src elisp
-(((name . "Alice") (total_items . 5)) ((name . "Bob") (total_items . 1)))
+1000
 #+end_src
 
-* Querying Org Tables
+#+begin_src elisp :results code
+(duckdb-query-column "SELECT unnest(['red','green','blue']) as color")
+#+end_src
 
-Named org tables resolve through ~@org:table-name~ syntax. Given a table in your
+#+RESULTS:
+#+begin_src elisp
+("red" "green" "blue")
+#+end_src
+
+#+begin_src elisp :results code
+(duckdb-query
+ "SELECT * FROM range(5) t(n)"
+ :format :columnar)
+#+end_src
+
+#+RESULTS:
+#+begin_src elisp
+((n . [0 1 2 3 4]))
+#+end_src
+
+** COMMENT  Querying Elisp Data
+
+Pass Elisp alists to queries via the ~:data~ parameter. The data becomes a table
+named ~@data~:
+
+#+begin_src elisp :results code
+(duckdb-query
+ "SELECT name, score * 1.1 as curved
+  FROM @data
+  WHERE score > 85"
+ :data '(((name . "Aly") (score . 95))
+         ((name . "Bob") (score . 87))
+         ((name . "Carol") (score . 72))))
+#+end_src
+
+#+RESULTS:
+#+begin_src elisp
+(((name . "Aly") (curved . 104.5)) ((name . "Bob") (curved . 95.7)))
+#+end_src
+
+For multiple tables, use named bindings with backquote to capture lexical
+variables:
+
+#+begin_src elisp :results code
+(let ((users ;; users table
+       '(((id . 1) (name . "Alice"))
+         ((id . 2) (name . "Bob"))))
+      (orders ;; orders table
+       '(((user_id . 1) (item . "Widget"))
+         ((user_id . 2) (item . "Gadget"))
+         ((user_id . 1) (item . "Gizmo")))))
+  (duckdb-query
+   "SELECT u.name, COUNT(*) as count
+    FROM @users u
+    JOIN @orders o ON u.id = o.user_id
+    GROUP BY u.name"
+   :data `((users . ,users)
+           (orders . ,orders))))
+#+end_src
+
+#+RESULTS:
+#+begin_src elisp
+(((name . "Alice") (count . 2)) ((name . "Bob") (count . 1)))
+#+end_src
+
+This enables joining runtime Elisp state with static file data. Previously this
+required exporting to CSV, running an external query, and parsing results. Now
+it is one expression.
+
+** COMMENT Querying Org Tables
+
+Reference named org tables with ~@org:table-name~. Given this table in your
 buffer:
 
-,#+NAME: inventory
 #+NAME: inventory
 | sku   | product | stock | price |
 |-------+---------+-------+-------|
@@ -137,209 +190,618 @@ buffer:
 | B-200 | Gadget  |    30 | 24.99 |
 | C-300 | Gizmo   |    75 | 14.99 |
 
-Query it directly:
-
-#+begin_src elisp  :exports both
-(duckdb-query "SELECT product, stock * price as inventory_value
-               FROM @org:inventory
-               WHERE stock > 40
-               ORDER BY inventory_value DESC"
-              :format :org-table)
+#+begin_src elisp :results code
+(duckdb-query
+ "SELECT product,
+    stock * price as value
+  FROM @org:inventory
+  ORDER BY value DESC"
+ :format :org-table)
 #+end_src
 
-#+RESULTS:
-| product | inventory_value |
-| Gizmo   |         1124.25 |
-| Widget  |           499.5 |
+Reference tables in other files with ~@org:path/to/file.org:table-name~.
 
-Cross-file references use ~@org:path/to/file.org:table-name~ syntax.
+** COMMENT  Combining Sources
 
-* Mixed-Source Queries
-
-Combine file data, Elisp structures, and org tables in a single query:
-
-#+begin_src elisp :results code :exports both
-(let ((discounts '(((sku . "A-100") (pct . 0.10))
-                   ((sku . "C-300") (pct . 0.15)))))
-  (duckdb-query "SELECT i.product,
-                        i.price as list_price,
-                        i.price * (1 - COALESCE(d.pct, 0)) as sale_price
-                 FROM @org:inventory i
-                 LEFT JOIN @discounts d ON i.sku = d.sku
-                 ORDER BY sale_price"
-                :data `((discounts . ,discounts))))
+Join an org table with Elisp data:
+#+begin_src elisp :results code
+(let ((sales '(((sku . "A-100") (qty . 10))
+               ((sku . "A-100") (qty . 5))
+               ((sku . "C-300") (qty . 20)))))
+  (duckdb-query
+   "SELECT i.product,
+           SUM(s.qty) as sold,
+           i.stock - SUM(s.qty) as remaining
+    FROM @org:inventory i
+    JOIN @sales s ON i.sku = s.sku
+    GROUP BY i.product, i.stock"
+   :data `((sales . ,sales))))
 #+end_src
 
-This query joins an org table in the buffer with an Elisp alist from a lexical
-variable, demonstrating the unified data model where source type is orthogonal
-to query semantics.
+Join a remote Parquet file with local Elisp configuration:
+#+begin_src elisp :results code 
+ (let ((airports '(((code . "JFK")
+                   (name . "JFK International"))
+                  ((code . "LGA")
+                   (name . "LaGuardia")))))
+  (duckdb-query
+   "SELECT a.name,
+           COUNT(*) as departures,
+           ROUND(AVG(f.dep_delay), 1) as avg_delay
+    FROM 'https://github.com/rfsaldanha/releases/releases/download/v1/flights.parquet' as f
+    JOIN @airports a ON f.origin = a.code
+    GROUP BY a.name
+    ORDER BY departures DESC"
+   :data `((airports . ,airports))))
 
-* Nested Type Preservation
-
-DuckDB supports STRUCT, LIST, MAP, and ARRAY types. By default, these serialize
-as string representations. The =:preserve-nested= parameter wraps nested columns
-with =to_json()= so they return as native Elisp structures:
-
-#+begin_src elisp :results code :exports both
-(let ((url "https://github.com/apache/parquet-mr/raw/master/parquet-hadoop/src/test/resources/test-file-with-no-column-indexes-1.parquet"))
-  (list
-   :without-preserve-nested
-   (duckdb-query (format "SELECT id, location FROM '%s' WHERE id = 1" url))
-   
-   :with-preserve-nested
-   (duckdb-query (format "SELECT id, location FROM '%s' WHERE id = 1" url)
-                 :preserve-nested t)))
+;; => (((name . "JFK International") (departures . 111279) (avg_delay . 12.1))
+;;     ((name . "LaGuardia") (departures . 104662) (avg_delay . 10.3)))
 #+end_src
 
 #+RESULTS:
 #+begin_src elisp
-(:without-preserve-nested (((id . 1) (location . "{'lon': 1.0, 'lat': 2.0}")))
- :with-preserve-nested (((id . 1) (location (lon . 1.0) (lat . 2.0)))))
+(((name . "JFK International") (departures . 111279) (avg_delay . 12.1))
+ ((name . "LaGuardia") (departures . 104662) (avg_delay . 10.3)))
 #+end_src
 
-Without =:preserve-nested=, the STRUCT becomes a string requiring manual
-parsing. With it, you get an alist accessible via =(cdr (assq 'lon location))=.
+** COMMENT  Output Formats
 
-The distinction matters for roundtrips. Nested Elisp structures passed back via
-=:data= retain their type information and DuckDB can access nested fields with
-dot notation and array indexing:
+The ~:format~ parameter controls result structure:
+
+| Format       | Structure                 | Use Case                      |
+|--------------+---------------------------+-------------------------------|
+| ~:alist~     | List of alists            | General Elisp processing      |
+| ~:plist~     | List of plists            | Keyword-based access          |
+| ~:hash~      | List of hash-tables       | O(1) field lookup             |
+| ~:vector~    | Vector of alists          | Index-based access            |
+| ~:columnar~  | Alist of column vectors   | Numerical analysis            |
+| ~:org-table~ | List of lists with header | Display, org-mode integration |
+| ~:raw~       | JSON string               | Custom parsing                |
+
+** COMMENT  Schema Introspection
+Discover structure before querying:
 
 #+begin_src elisp :results code :exports both
-(let* ((url "https://github.com/apache/parquet-mr/raw/master/parquet-hadoop/src/test/resources/test-file-with-no-column-indexes-1.parquet")
-       (data (duckdb-query 
-              (format "SELECT * FROM '%s' WHERE location IS NOT NULL LIMIT 3" url)
-              :preserve-nested t)))
-  ;; Query the Elisp data - nested field access works
-  (duckdb-query 
-   "SELECT id, name, location.lon as lon, phoneNumbers.phone[1].kind as phone_type
+(duckdb-query-column-types "SELECT 1 as id, 'text' as name, 3.14 as value")
+;; => (("id" . "INTEGER") ("name" . "VARCHAR") ("value" . "DECIMAL(3,2)"))
+#+end_src
+
+#+begin_src elisp :results code :exports both
+(duckdb-query-columns
+ "https://github.com/rfsaldanha/releases/releases/download/v1/flights.parquet")
+
+;; => ("year" "month" "day" "dep_time" "sched_dep_time" "dep_delay" "arr_time"
+;;     "sched_arr_time" "arr_delay" "carrier" "flight" "tailnum" "origin" "dest"
+;;     "air_time" "distance" "hour" "minute" "time_hour")
+#+end_src
+
+** COMMENT  Database Persistence
+For workflows requiring state across queries, bind a database file:
+
+#+begin_src elisp :results code
+(duckdb-with-transient-database
+  (duckdb-query
+   "CREATE TABLE events (id INT, name TEXT)"
+   :readonly nil)
+  (duckdb-query
+   "INSERT INTO events VALUES
+    (1, 'click'), (2, 'scroll')"
+   :readonly nil)
+  (duckdb-query "SELECT * FROM events"))
+#+end_src
+
+#+RESULTS:
+#+begin_src elisp
+(((id . 1) (name . "click")) ((id . 2) (name . "scroll")))
+#+end_src
+
+
+~duckdb-with-transient-database~ creates a temporary file deleted after the
+block. Use ~duckdb-with-database~ for persistent files:
+
+#+begin_src elisp :results code
+(duckdb-with-database "analytics.duckdb"
+  (duckdb-query "SELECT COUNT(*) FROM events"))
+#+end_src
+
+** COMMENT  Nested Types
+
+DuckDB supports STRUCT, LIST, MAP, and ARRAY types. These serialize correctly as
+nested Elisp structures:
+
+#+begin_src elisp :results code
+(duckdb-query
+ "SELECT
+    {'x': 1, 'y': 2}::STRUCT(x INT, y INT)
+    as point")
+#+end_src
+
+#+RESULTS:
+#+begin_src elisp
+(((point (x . 1) (y . 2))))
+#+end_src
+
+#+begin_src elisp :results code 
+;; Nested data survives roundtrips
+(let ((data
+       '(((id . 1) (loc (x . 10) (y . 20)))
+         ((id . 2) (loc (x . 30) (y . 40))))))
+  (duckdb-query
+   "SELECT id, loc.x + loc.y as sum
     FROM @data"
    :data data))
 #+end_src
 
 #+RESULTS:
 #+begin_src elisp
-(((id . 1) (name . "p1") (lon . 1.0) (phone_type . "cell"))
- ((id . 2) (name . "p2") (lon . 2.0) (phone_type . "cell"))
- ((id . 4) (name . "p4") (lon . 4.0) (phone_type . "cell")))
+(((id . 1) (sum . 30)) ((id . 2) (sum . 70)))
 #+end_src
 
+** COMMENT  Performance
 
-The =location.lon= dot notation and =phone[1].kind= array access work because
-the nested STRUCT and LIST types survived the Elisp roundtrip intact.
+The package writes results to temporary files by default, providing 3-5x speedup
+on large results compared to streaming through stdout:
 
-* Schema Introspection
-Discover column names and types before querying:
+: | Result Size | Default (file) | Streaming (pipe) | Speedup |
+: |-------------+----------------+------------------+---------|
+: | 10k rows    | 64ms           | 162ms            | 2.5x    |
+: | 100k rows   | 366ms          | 1.28s            | 3.5x    |
+: | 500k rows   | 1.32s          | 6.19s            | 4.7x    |
 
-#+begin_src elisp :results code :exports both
-(duckdb-query-columns "~/data/sales.parquet")
-;; => ("date" "product" "quantity" "price")
+Force streaming mode with ~:output-via :pipe~ when needed. DDL statements
+automatically use streaming since they cannot be wrapped in file output.
 
-(duckdb-query-column-types "SELECT 1 as id, 'text' as name, 3.14 as value")
-#+end_src
+Profile your specific queries with the benchmark module:
 
-#+RESULTS:
-#+begin_src elisp
-(("id" . "INTEGER") ("name" . "VARCHAR") ("value" . "DECIMAL(3,2)"))
-#+end_src
-
-The ~duckdb-query-describe~ function returns full metadata including nullability
-and key constraints for database tables.
-
-* Database Context
-
-Persistent database files enable multi-query workflows:
-
-#+begin_src elisp :results code :exports both
-(duckdb-with-database "analytics.db"
-  (duckdb-query "CREATE TABLE IF NOT EXISTS events (id INTEGER, ts TIMESTAMP)"
-                :readonly nil)
-  (duckdb-query "INSERT INTO events VALUES (1, NOW())" :readonly nil)
-  (duckdb-query "SELECT COUNT(*) as n FROM events"))
-;; => (((n . 1)))
+#+begin_src elisp 
+(duckdb-query-bench-output-strategies
+ "SELECT * FROM range(10000) t(i)"
+ :iterations 3)
 #+end_src
 
 #+RESULTS:
-#+begin_src elisp
-(((n . 1)))
-#+end_src
+| strategy | mean    | min     | max     | n |
+| :file    | 20.62ms | 20.12ms | 21.52ms | 3 |
+| :pipe    | 20.84ms | 20.50ms | 21.42ms | 3 |
+| :speedup | 1.01x   |         |         |   |
 
-The ~duckdb-with-transient-database~ macro creates a temporary file-backed
-database for workflows requiring state across multiple CLI invocations but no
-persistence.
+Other benchmark functions: ~duckdb-query-bench-formats~ (compare output formats),
+~duckdb-query-bench-nested-types~ (compare nested type handling),
+~duckdb-query-bench-data-formats~ (compare ~:data~ serialization).
 
-* Scalar and Column Extraction
+** COMMENT  Acknowledgements
 
-Common patterns have dedicated functions:
+- [[https://github.com/ak-coram/cl-duckdb][cl-duckdb]] by Ákos Kiss: The Common Lisp DuckDB wrapper that inspired this
+  package's design philosophy. The approach of treating query results as native
+  Lisp data structures, the ~with-static-table~ pattern for querying Lisp data
+  directly, and the ~with-transient-connection~ / ~with-default-connection~
+  macros for database context management all informed the design of
+  duckdb-query's ~:data~ parameter, ~@org:~ references, and
+  ~duckdb-with-transient-database~ / ~duckdb-with-database~ forms.
 
-#+begin_src elisp :results code :exports both
-(duckdb-query-value "SELECT MAX(price) FROM @org:inventory")
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-24.99
-#+end_src
-
-#+begin_src elisp :results code :exports both
-;; querying the org-table shown before
-(duckdb-query-column "SELECT product FROM @org:inventory ORDER BY price")
-;; => ("Widget" "Gizmo" "Gadget")
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-("Widget" "Gizmo" "Gadget")
-#+end_src
-
-These eliminate boilerplate for single-value and single-column results.
-
-* Output Formats
-
-The ~:format~ parameter controls result structure:
-
-| Format       | Structure                      | Use Case                        |
-|--------------+--------------------------------+---------------------------------|
-| ~:alist~     | List of alists                 | General Elisp processing        |
-| ~:plist~     | List of plists                 | Keyword-based access            |
-| ~:hash~      | List of hash-tables            | Large datasets, O(1) lookup     |
-| ~:vector~    | Vector of alists               | Index-based access              |
-| ~:columnar~  | Alist of column vectors        | Numerical/statistical analysis  |
-| ~:org-table~ | List of lists with header      | Direct org-mode insertion       |
-| ~:raw~       | Unprocessed JSON string        | Custom parsing, debugging       |
-
-* Executor Protocol
-
-Custom execution strategies implement the ~duckdb-query-execute~ generic function.
-The default ~:cli~ executor invokes the DuckDB command-line tool. Pass a function
-for alternative execution:
-
-#+begin_src elisp :results code :exports both
-(defun my-logged-executor (query &rest args)
-  (message "Executing: %s" query)
-  (apply #'duckdb-query-execute :cli query args))
-
-(duckdb-query "SELECT 1" :executor #'my-logged-executor)
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-(((\1 . 1)))
-#+end_src
-
-This enables integration with custom logging, connection pooling, or alternative
-backends.
-
-* Requirements
-
-- Emacs 28.1 or later (for native JSON parsing via ~json-serialize~)
-- DuckDB CLI binary in ~exec-path~ (configurable via ~duckdb-query-executable~)
-
-* Related Packages
-
+** COMMENT  Related Packages
 - [[https://github.com/jhinch/ob-duckdb][ob-duckdb]]: Org Babel integration for DuckDB source blocks. SOON I'll add most
   of the functionalities here to it via a specialized ob-duckdb-query executor,
   this will allow org-table reference in duckdb-sql source blocks and new output
   types.
 
+  
+* Quick Examples
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Result</th></tr>
+<tr><td>
+<pre lang="elisp">;; List of alists (default)
+(duckdb-query
+ "SELECT 'Alice' as name, 95 as score
+  UNION ALL SELECT 'Bob', 87")</pre>
+</td><td>
+<pre lang="elisp">(((name . "Alice") (score . 95))
+ ((name . "Bob") (score . 87)))</pre>
+</td></tr>
 
-PFC ›  
+<!-- spacing -->
+<tr></tr>
+
+<tr><td>
+<pre lang="elisp">;; Org-table format for display
+(duckdb-query
+ "SELECT * FROM range(1,4) t(n),
+   (SELECT unnest(['a','b']) as letter)"
+ :format :org-table)</pre>
+</td><td>
+<pre>
+,  rendered       data 
+,| n | letter | ((n letter)
+,|---|--------|  (1 "a") (2 "a")
+,| 1 | a      |  (3 "a") (1 "b")
+,| 1 | b      |  (2 "b") (3 "b"))
+,| 2 | a      |
+,| 2 | b      |
+,| 3 | a      |
+,| 3 | b      |
+</pre>
+</td></tr>
+
+<!-- spacing -->
+<tr></tr>
+
+<tr><td>
+<pre lang="elisp">;; Single value extraction
+(duckdb-query-value
+ "SELECT COUNT(*) FROM range(1000)")</pre>
+</td><td>
+<pre lang="elisp">1000</pre>
+</td></tr>
+
+<!-- spacing -->
+<tr></tr>
+
+<tr><td>
+<pre lang="elisp">;; Single column as list
+(duckdb-query-column
+ "SELECT unnest(
+ ['red','green','blue']) as color")</pre>
+</td><td>
+<pre lang="elisp">("red" "green" "blue")</pre>
+</td></tr>
+
+<!-- spacing -->
+<tr></tr>
+
+<tr><td>
+<pre lang="elisp">;; Columnar format for analysis
+(duckdb-query
+ "SELECT * FROM range(5) t(n)"
+ :format :columnar)</pre>
+</td><td>
+<pre lang="elisp">((n . [0 1 2 3 4]))</pre>
+</td></tr></table>
+#+end_html
+* Contents :noexport:
+:PROPERTIES:
+:TOC:      :include siblings :depth 1 :ignore this
+:END:
+:CONTENTS:
+- [[#querying-elisp-data][Querying Elisp Data]]
+- [[#querying-org-tables][Querying Org Tables]]
+- [[#combining-sources][Combining Sources]]
+- [[#output-formats][Output Formats]]
+- [[#schema-introspection][Schema Introspection]]
+- [[#database-persistence][Database Persistence]]
+- [[#nested-types][Nested Types]]
+- [[#performance][Performance]]
+- [[#acknowledgements][Acknowledgements]]
+- [[#related-packages][Related Packages]]
+:END:
+
+* Querying Elisp Data
+:PROPERTIES:
+:CUSTOM_ID: querying-elisp-data
+:END:
+
+Pass Elisp alists to queries via the ~:data~ parameter. The data becomes a table
+named ~@data~:
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Result</th></tr>
+<tr><td>
+<pre lang="elisp">(duckdb-query
+ "SELECT name, score * 1.1 as curved
+  FROM @data
+  WHERE score > 85"
+ :data '(((name . "Aly") (score . 95))
+         ((name . "Bob") (score . 87))
+         ((name . "Carol") (score . 72))))</pre>
+</td><td>
+<pre lang="elisp">(((name . "Aly") (curved . 104.5))
+ ((name . "Bob") (curved . 95.7)))</pre>
+</td></tr></table>
+#+end_html
+
+For multiple tables, use named bindings with backquote to capture lexical
+variables:
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Result</th></tr>
+<tr><td>
+<pre lang="elisp"> (let ((users ;; users table
+       '(((id . 1) (name . "Alice"))
+         ((id . 2) (name . "Bob"))))
+      (orders ;; orders table
+       '(((user_id . 1) (item . "Widget"))
+         ((user_id . 2) (item . "Gadget"))
+         ((user_id . 1) (item . "Gizmo")))))
+  (duckdb-query
+   "SELECT u.name, COUNT(*) as count
+    FROM @users u
+    JOIN @orders o ON u.id = o.user_id
+    GROUP BY u.name"
+   :data `((users . ,users)
+           (orders . ,orders))))</pre>
+</td><td>
+<pre lang="elisp">
+(((name . "Alice") (count . 2))
+ ((name . "Bob") (count . 1)))
+</pre>
+</td></tr></table>
+#+end_html
+
+This enables joining runtime Elisp state with static file data. Previously this
+required exporting to CSV, running an external query, and parsing results. Now
+it is one expression.
+
+* Querying Org Tables
+:PROPERTIES:
+:CUSTOM_ID: querying-org-tables
+:END:
+
+Reference named org tables with ~@org:table-name~. Given this table in your
+buffer:
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Table</th>
+<tr><td align="center">
+<pre>
+,#+NAME: inventory                  
+,| sku   | product | stock | price |
+,|-------+---------+-------+-------|
+,| A-100 | Widget  |    50 |  9.99 |
+,| B-200 | Gadget  |    30 | 24.99 |
+,| C-300 | Gizmo   |    75 | 14.99 |
+</pre>
+</td></tr></table>
+#+end_html
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Result</th></tr>
+<tr><td>
+<pre lang="elisp">(duckdb-query
+ "SELECT product,
+    stock * price as value
+  FROM @org:inventory
+  ORDER BY value DESC"
+ :format :org-table)</pre>
+</td><td>
+<pre>
+,| product |   value | ((product value)     
+,|---------+---------|  ("Gizmo" 1124.25)
+,| Gizmo   | 1124.25 |  ("Gadget" 749.7)
+,| Gadget  |   749.7 |  ("Widget" 499.5))
+,| Widget  |   499.5 |
+</pre>
+</td></tr></table>
+#+end_html
+
+Reference tables in other files with ~@org:path/to/file.org:table-name~.
+
+* Combining Sources
+:PROPERTIES:
+:CUSTOM_ID: combining-sources
+:END:
+
+Join an org table with Elisp data:
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Result</th></tr>
+<tr><td>
+<pre lang="elisp">(let ((sales '(((sku . "A-100") (qty . 10))
+               ((sku . "A-100") (qty . 5))
+               ((sku . "C-300") (qty . 20)))))
+  (duckdb-query
+   "SELECT i.product,
+           SUM(s.qty) as sold,
+           i.stock - SUM(s.qty) as remaining
+    FROM @org:inventory i
+    JOIN @sales s ON i.sku = s.sku
+    GROUP BY i.product, i.stock"
+   :data `((sales . ,sales))))</pre>
+</td><td>
+<pre lang="elisp">(((product . "Widget")
+  (sold . 15)
+  (remaining . 35))
+ ((product . "Gizmo")
+  (sold . 20)
+  (remaining . 55)))</pre>
+</td></tr></table>
+#+end_html
+
+Join a remote Parquet file with local Elisp data:
+#+begin_src elisp :results code 
+ (let ((airports '(((code . "JFK")
+                   (name . "JFK International"))
+                  ((code . "LGA")
+                   (name . "LaGuardia")))))
+  (duckdb-query
+   "SELECT a.name,
+           COUNT(*) as departures,
+           ROUND(AVG(f.dep_delay), 1) as avg_delay
+    FROM 'https://github.com/rfsaldanha/releases/releases/download/v1/flights.parquet' as f
+    JOIN @airports a ON f.origin = a.code
+    GROUP BY a.name
+    ORDER BY departures DESC"
+   :data `((airports . ,airports))))
+
+;; => (((name . "JFK International") (departures . 111279) (avg_delay . 12.1))
+;;     ((name . "LaGuardia") (departures . 104662) (avg_delay . 10.3)))
+#+end_src
+
+* Output Formats
+:PROPERTIES:
+:CUSTOM_ID: output-formats
+:END:
+
+The ~:format~ parameter controls result structure:
+
+| Format       | Structure                 | Use Case                      |
+|--------------+---------------------------+-------------------------------|
+| ~:alist~     | List of alists            | General Elisp processing      |
+| ~:plist~     | List of plists            | Keyword-based access          |
+| ~:hash~      | List of hash-tables       | O(1) field lookup             |
+| ~:vector~    | Vector of alists          | Index-based access            |
+| ~:columnar~  | Alist of column vectors   | Numerical analysis            |
+| ~:org-table~ | List of lists with header | Display, org-mode integration |
+| ~:raw~       | JSON string               | Custom parsing                |
+
+* Schema Introspection
+:PROPERTIES:
+:CUSTOM_ID: schema-introspection
+:END:
+Discover structure before querying:
+
+#+begin_src elisp :results code :exports both
+(duckdb-query-column-types "SELECT 1 as id, 'text' as name, 3.14 as value")
+;; => (("id" . "INTEGER") ("name" . "VARCHAR") ("value" . "DECIMAL(3,2)"))
+#+end_src
+
+#+begin_src elisp :results code :exports both
+(duckdb-query-columns
+ "https://github.com/rfsaldanha/releases/releases/download/v1/flights.parquet")
+
+;; => ("year" "month" "day" "dep_time" "sched_dep_time" "dep_delay" "arr_time"
+;;     "sched_arr_time" "arr_delay" "carrier" "flight" "tailnum" "origin" "dest"
+;;     "air_time" "distance" "hour" "minute" "time_hour")
+#+end_src
+
+* Database Persistence
+:PROPERTIES:
+:CUSTOM_ID: database-persistence
+:END:
+For workflows requiring state across queries, bind a database file:
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Result</th></tr>
+<tr><td>
+<pre lang="elisp">(duckdb-with-transient-database
+  (duckdb-query
+   "CREATE TABLE events (id INT, name TEXT)"
+   :readonly nil)
+  (duckdb-query
+   "INSERT INTO events VALUES
+    (1, 'click'), (2, 'scroll')"
+   :readonly nil)
+  (duckdb-query "SELECT * FROM events"))</pre>
+</td><td>
+<pre lang="elisp">(((id . 1) (name . "click"))
+ ((id . 2) (name . "scroll")))</pre>
+</td></tr></table>
+#+end_html
+
+~duckdb-with-transient-database~ creates a temporary file deleted after the
+block. Use ~duckdb-with-database~ for persistent files:
+
+#+begin_src elisp
+(duckdb-with-database "analytics.db"
+  (duckdb-query "SELECT COUNT(*) FROM events"))
+#+end_src
+
+* Nested Types
+:PROPERTIES:
+:CUSTOM_ID: nested-types
+:END:
+
+DuckDB supports STRUCT, LIST, MAP, and ARRAY types. These serialize correctly as
+nested Elisp structures:
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Result</th></tr>
+<tr><td>
+<pre lang="elisp">(duckdb-query
+ "SELECT
+    {'x': 1, 'y': 2}::STRUCT(x INT, y INT)
+    as point")
+</pre>
+</td><td>
+<pre lang="elisp">(((point (x . 1) (y . 2))))</pre>
+</td></tr>
+<tr><td>
+<pre lang="elisp">;; Nested data survives roundtrips
+(let ((data
+       '(((id . 1) (loc (x . 10) (y . 20)))
+         ((id . 2) (loc (x . 30) (y . 40))))))
+  (duckdb-query
+   "SELECT id, loc.x + loc.y as sum
+    FROM @data"
+   :data data))</pre>
+</td><td>
+<pre lang="elisp">(((id . 1) (sum . 30))
+ ((id . 2) (sum . 70)))</pre>
+</td></tr></table>
+#+end_html
+
+* Performance
+:PROPERTIES:
+:CUSTOM_ID: performance
+:END:
+
+The package writes results to temporary files by default, providing 3-5x speedup
+on large results compared to streaming through stdout:
+
+: | Result Size | Default (file) | Streaming (pipe) | Speedup |
+: |-------------+----------------+------------------+---------|
+: | 10k rows    | 64ms           | 162ms            | 2.5x    |
+: | 100k rows   | 366ms          | 1.28s            | 3.5x    |
+: | 500k rows   | 1.32s          | 6.19s            | 4.7x    |
+
+Force streaming mode with ~:output-via :pipe~ when needed. DDL statements
+automatically use streaming since they cannot be wrapped in file output.
+
+Profile your specific queries with the benchmark module:
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Result</th></tr>
+<tr><td>
+<pre lang="elisp">(duckdb-query-bench-output-strategies
+ "SELECT * FROM range(10000) t(i)"
+ :iterations 3)</pre>
+</td><td>
+<pre>,| strategy | mean  | min   | max   | n |
+,|----------|-------|-------|-------|---|
+,| :file    | 22ms  | 21ms  | 23ms  | 3 |
+,| :pipe    | 28ms  | 27ms  | 29ms  | 3 |
+,| :speedup | 1.27x |       |       |   |</pre>
+</td></tr></table>
+#+end_html
+
+Other benchmark functions: ~duckdb-query-bench-formats~ (compare output formats),
+~duckdb-query-bench-nested-types~ (compare nested type handling),
+~duckdb-query-bench-data-formats~ (compare ~:data~ serialization).
+
+* Acknowledgements
+:PROPERTIES:
+:CUSTOM_ID: acknowledgements
+:END:
+
+- [[https://github.com/ak-coram/cl-duckdb][cl-duckdb]] by Ákos Kiss: The Common Lisp DuckDB wrapper that inspired this
+  package's design philosophy. The approach of treating query results as native
+  Lisp data structures, the ~with-static-table~ pattern for querying Lisp data
+  directly, and the ~with-transient-connection~ / ~with-default-connection~
+  macros for database context management all informed the design of
+  duckdb-query's ~:data~ parameter, ~@org:~ references, and
+  ~duckdb-with-transient-database~ / ~duckdb-with-database~ forms.
+
+* Related Packages
+:PROPERTIES:
+:CUSTOM_ID: related-packages
+:END:
+
+- [[https://github.com/jhinch/ob-duckdb][ob-duckdb]]: Org Babel integration for DuckDB source blocks. SOON I'll add most
+  of the functionalities here to it via a specialized ob-duckdb-query executor,
+  this will allow org-table reference in duckdb-sql source blocks and new output
+  types.
