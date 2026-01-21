@@ -497,22 +497,29 @@ TIMEOUT is execution timeout in seconds (currently unused).
 Return output string on success.
 Signal error with DuckDB's message on failure.
 
-Use `call-process' for subprocess invocation.
-Set DUCKDB_NO_COLOR environment variable to disable color codes.
+Uses temp file with `-f' flag for sequential statement execution,
+enabling extension syntax that requires LOAD before use.
 
 Called by `duckdb-query-execute' `:cli' method."
-  (with-temp-buffer
-    (let* ((default-directory temporary-file-directory)
-           (process-environment (cons "DUCKDB_NO_COLOR=1" process-environment))
-           (exit-code (apply #'call-process
-                             (car cli-args) nil t nil
-                             (append (cdr cli-args)
-                                     (list "-c" query))))
-           (output (buffer-string)))
-      (if (zerop exit-code)
-          output
-        (error "DuckDB execution failed (exit %d): %s"
-               exit-code (string-trim output))))))
+  (let ((sql-file (make-temp-file "duckdb-pipe-" nil ".sql")))
+    (unwind-protect
+        (progn
+          (with-temp-file sql-file
+            (insert query))
+          (with-temp-buffer
+            (let* ((default-directory temporary-file-directory)
+                   (process-environment (cons "DUCKDB_NO_COLOR=1" process-environment))
+                   (exit-code (apply #'call-process
+                                     (car cli-args) nil t nil
+                                     (append (cdr cli-args)
+                                             (list "-f" sql-file))))
+                   (output (buffer-string)))
+              (if (zerop exit-code)
+                  output
+                (error "DuckDB execution failed (exit %d): %s"
+                       exit-code (string-trim output))))))
+      (when (file-exists-p sql-file)
+        (delete-file sql-file)))))
 
 (defun duckdb-query--invoke-cli-file (cli-args query _timeout)
   "Execute QUERY via COPY TO with file-based I/O for better performance.
