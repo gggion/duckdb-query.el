@@ -2,7 +2,7 @@
 
 ;; Author: Gino Cornejo
 ;; Maintainer: Gino Cornejo <gggion123@gmail.com>
-;; Homepage: https://github.com/gggion/duckdb-query
+;; Homepage: https://github.com/gggion/duckdb-query.el
 
 ;; This file is part of duckdb-query.
 
@@ -488,4 +488,5 @@ Also see individual benchmark functions for focused testing."
     (cons '(benchmark category mean min max n) (nreverse rows))))
 
 (provide 'duckdb-query-bench)
+
 ;;; duckdb-query-bench.el ends here

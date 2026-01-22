@@ -377,6 +377,8 @@ ensures state persists across queries."
            (delete-file ,db-var))))))
 
 ;;;; Interactive Functions
+
+;;;###autoload
 (defun duckdb-query-set-default-database (&optional path)
   "Set default database for `duckdb-query' to PATH.
 
@@ -1371,4 +1373,3 @@ Example:
 (provide 'duckdb-query)
 
 ;;; duckdb-query.el ends here
-
