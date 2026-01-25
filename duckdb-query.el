@@ -640,6 +640,205 @@ Signal error on execution failure after fallback."
                            :nullvalue nullvalue)))
            (duckdb-query--invoke-cli pipe-args query timeout)))))))
 
+;;;;; Session Executor
+;;;;;; Customization
+
+(defgroup duckdb-query-session nil
+  "Session-based execution for low-latency DuckDB queries."
+  :group 'duckdb-query
+  :prefix "duckdb-query-session-")
+
+(defcustom duckdb-query-session-init-commands nil
+  "SQL commands to execute when session process starts.
+
+List of SQL strings run during process initialization.  Useful for
+loading extensions or setting session-wide configuration.
+
+Example:
+  (setq duckdb-query-session-init-commands
+        \\='(\"INSTALL spatial\" \"LOAD spatial\"))"
+  :type '(repeat string)
+  :group 'duckdb-query-session
+  :package-version '(duckdb-query . "0.8.0"))
+
+;;;;;; Data Structures
+
+(cl-defstruct (duckdb-session
+               (:constructor duckdb-session--create)
+               (:copier nil))
+  "Session representing a persistent DuckDB process.
+
+Sessions maintain state across queries: temp tables, loaded extensions,
+and settings persist until session is killed."
+  (name nil :documentation "Session name string.")
+  (temp-db nil :documentation "Temp database file path.")
+  (process nil :documentation "Emacs process object.")
+  (output "" :documentation "Accumulated process output.")
+  (status 'active :documentation "Status: active, error, initializing.")
+  (created-at nil :documentation "Creation timestamp.")
+  (last-used nil :documentation "Most recent query timestamp.")
+  (query-count 0 :documentation "Total queries executed."))
+
+(defvar duckdb-query-sessions (make-hash-table :test 'equal)
+  "Registry mapping session names to `duckdb-session' structs.")
+
+;;;;;; Internal Helpers
+
+(defun duckdb-query-session--make-filter (session)
+  "Create process filter accumulating output in SESSION."
+  (lambda (_proc string)
+    (setf (duckdb-session-output session)
+          (concat (duckdb-session-output session) string))))
+
+(defun duckdb-query-session--initialize (proc session)
+  "Initialize SESSION process PROC with startup commands."
+  (condition-case err
+      (progn
+        (accept-process-output proc 2.0)
+        (setf (duckdb-session-output session) "")
+        (dolist (cmd duckdb-query-session-init-commands)
+          (process-send-string proc (concat cmd ";\n"))
+          (accept-process-output proc 1.0))
+        (setf (duckdb-session-output session) "")
+        (setf (duckdb-session-status session) 'active))
+    (error
+     (setf (duckdb-session-status session) 'error)
+     (signal (car err) (cdr err)))))
+
+(defun duckdb-query-session--extract-json (output)
+  "Extract JSON from OUTPUT, stripping trailing prompt.
+
+DuckDB outputs JSON followed by newline and prompt 'D '.
+Finds the last ] or } and returns content up to and including it.
+For non-JSON output (DDL), returns trimmed string."
+  (let ((trimmed (string-trim output)))
+    (cond
+     ;; Empty
+     ((string-empty-p trimmed) "")
+
+     ;; Starts with [ - JSON array, find last ]
+     ((eq (aref trimmed 0) ?\[)
+      (let ((last-pos (cl-position ?\] trimmed :from-end t)))
+        (if last-pos
+            (substring trimmed 0 (1+ last-pos))
+          trimmed)))
+
+     ;; Starts with { - JSON object, find last }
+     ((eq (aref trimmed 0) ?\{)
+      (let ((last-pos (cl-position ?\} trimmed :from-end t)))
+        (if last-pos
+            (substring trimmed 0 (1+ last-pos))
+          trimmed)))
+
+     ;; Not JSON - return trimmed (strips "D " for DDL)
+     (t trimmed))))
+
+;;;;;; Session Lifecycle
+
+(defun duckdb-query-session-start (name)
+  "Start session NAME with fresh temp database.
+
+NAME is string identifying the session.
+Returns `duckdb-session' struct.
+
+Signals error if session NAME already exists."
+  (when (gethash name duckdb-query-sessions)
+    (error "Session %s already exists" name))
+  (let* ((temp-db (make-temp-file "duckdb-session-" nil ".duckdb"))
+         (_ (delete-file temp-db))  ; DuckDB creates it
+         (proc (start-process (format "duckdb-session-%s" name)
+                              nil
+                              duckdb-query-executable
+                              temp-db
+                              "-json"))
+         (session (duckdb-session--create
+                   :name name
+                   :temp-db temp-db
+                   :process proc
+                   :output ""
+                   :status 'initializing
+                   :created-at (current-time)
+                   :last-used (current-time)
+                   :query-count 0)))
+    (set-process-filter proc (duckdb-query-session--make-filter session))
+    (puthash name session duckdb-query-sessions)
+    (duckdb-query-session--initialize proc session)
+    session))
+
+(defun duckdb-query-session-get (name)
+  "Get session NAME, or nil if not exists."
+  (gethash name duckdb-query-sessions))
+
+(defun duckdb-query-session-kill (name)
+  "Kill session NAME and delete its temp database."
+  (when-let ((session (gethash name duckdb-query-sessions)))
+    (let ((proc (duckdb-session-process session))
+          (temp-db (duckdb-session-temp-db session)))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (when (and temp-db (file-exists-p temp-db))
+        (delete-file temp-db)))
+    (remhash name duckdb-query-sessions)))
+
+(defun duckdb-query-session-list ()
+  "Return list of all session structs."
+  (let ((result nil))
+    (maphash (lambda (_k v) (push v result))
+             duckdb-query-sessions)
+    (nreverse result)))
+
+;;;;;; Query Execution
+
+(defun duckdb-query-session-execute (name query timeout)
+  "Execute QUERY in session NAME, wait up to TIMEOUT seconds.
+
+Returns result string.
+Signals error on timeout or if session doesn't exist."
+  (let* ((session (or (gethash name duckdb-query-sessions)
+                      (error "Session %s does not exist" name)))
+         (proc (duckdb-session-process session))
+         (marker (format "DUCKDB_SESSION_COMPLETE_%s"
+                         (md5 (format "%s%s" query (current-time)))))
+         (start-time (current-time)))
+    (unless (process-live-p proc)
+      (error "Session %s process is dead" name))
+    ;; Clear output buffer
+    (setf (duckdb-session-output session) "")
+    ;; Send query with completion marker
+    (process-send-string proc (format "%s;\n.print \"%s\"\n" query marker))
+    ;; Wait for completion
+    (let ((found nil))
+      (while (and (not found)
+                  (< (float-time (time-since start-time)) timeout))
+        (accept-process-output proc 0.001)
+        (setq found (string-search marker (duckdb-session-output session))))
+      (unless found
+        (setf (duckdb-session-status session) 'error)
+        (error "Query timed out after %d seconds" timeout)))
+    ;; Update stats
+    (setf (duckdb-session-last-used session) (current-time))
+    (cl-incf (duckdb-session-query-count session))
+    ;; Extract result before marker
+    (string-trim
+     (substring (duckdb-session-output session)
+                0
+                (string-search marker (duckdb-session-output session))))))
+
+;;;;;; Executor Integration
+
+(cl-defmethod duckdb-query-execute ((_executor (eql :session)) query &rest args)
+  "Execute QUERY via named session.
+
+ARGS supports:
+  :session - Session name string (required)
+  :timeout - Query timeout seconds (default `duckdb-query-default-timeout')
+
+Session must be started via `duckdb-query-session-start' first."
+  (let ((session-name (or (plist-get args :session)
+                          (error ":session argument required for session executor")))
+        (timeout (or (plist-get args :timeout)
+                     duckdb-query-default-timeout)))
+    (duckdb-query-session-execute session-name query timeout)))
 ;;;;; Function Executors
 
 (cl-defmethod duckdb-query-execute ((executor function) query &rest args)
