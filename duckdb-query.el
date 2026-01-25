@@ -1483,7 +1483,9 @@ Uses `duckdb-query--substitute-org-refs' for @org: replacement."
                                  org-resolved-query data data-format temp-files)
                               org-resolved-query))
          ;; Then: wrap for nested preservation (only for pipe mode)
-         (effective-query (if (and preserve-nested (eq output-via :pipe))
+         (effective-query (if (and preserve-nested
+                                   (or (eq output-via :pipe)
+                                       (eq executor :session)))
                               (duckdb-query--wrap-nested-columns substituted-query)
                             substituted-query))
          (db (or database duckdb-query-default-database))
