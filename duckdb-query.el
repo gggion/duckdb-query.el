@@ -708,7 +708,7 @@ and settings persist until session is killed."
 (defun duckdb-query-session--extract-json (output)
   "Extract JSON from OUTPUT, stripping trailing prompt.
 
-DuckDB outputs JSON followed by newline and prompt 'D '.
+DuckDB outputs JSON followed by newline and prompt \\='D \\='.
 Finds the last ] or } and returns content up to and including it.
 For non-JSON output (DDL), returns trimmed string."
   (let ((trimmed (string-trim output)))
@@ -792,7 +792,7 @@ Signals error if session NAME already exists."
 (defun duckdb-query-session-execute (name query timeout)
   "Execute QUERY in session NAME, wait up to TIMEOUT seconds.
 
-Returns result string.
+Returns result string with JSON extracted cleanly.
 Signals error on timeout or if session doesn't exist."
   (let* ((session (or (gethash name duckdb-query-sessions)
                       (error "Session %s does not exist" name)))
@@ -818,8 +818,8 @@ Signals error on timeout or if session doesn't exist."
     ;; Update stats
     (setf (duckdb-session-last-used session) (current-time))
     (cl-incf (duckdb-session-query-count session))
-    ;; Extract result before marker
-    (string-trim
+    ;; Extract result before marker, then strip trailing prompt
+    (duckdb-query-session--extract-json
      (substring (duckdb-session-output session)
                 0
                 (string-search marker (duckdb-session-output session))))))
@@ -1493,48 +1493,71 @@ Uses `duckdb-query--substitute-org-refs' for @org: replacement."
                               :output-via output-via
                               clean-args))
           (when (and output (not (string-empty-p (string-trim output))))
-            (pcase format
-              (:raw output)
-              (:alist
-               (json-parse-string output
-                                  :object-type 'alist
-                                  :array-type 'list
-                                  :null-object duckdb-query-null-value
-                                  :false-object duckdb-query-false-value))
-              (:plist
-               (json-parse-string output
-                                  :object-type 'plist
-                                  :array-type 'list
-                                  :null-object duckdb-query-null-value
-                                  :false-object duckdb-query-false-value))
-              (:hash
-               (json-parse-string output
-                                  :object-type 'hash-table
-                                  :array-type 'list
-                                  :null-object duckdb-query-null-value
-                                  :false-object duckdb-query-false-value))
-              (:vector
-               (json-parse-string output
-                                  :object-type 'alist
-                                  :array-type 'array
-                                  :null-object duckdb-query-null-value
-                                  :false-object duckdb-query-false-value))
-              (:columnar
-               (duckdb-query--to-columnar
-                (json-parse-string output
-                                   :object-type 'alist
-                                   :array-type 'list
-                                   :null-object duckdb-query-null-value
-                                   :false-object duckdb-query-false-value)))
-              (:org-table
-               (duckdb-query--to-org-table
-                (json-parse-string output
-                                   :object-type 'alist
-                                   :array-type 'list
-                                   :null-object duckdb-query-null-value
-                                   :false-object duckdb-query-false-value)))
-              (_
-               (error "Unknown format: %s.  Valid: :alist :plist :hash :vector :columnar :org-table :raw" format)))))
+            (let ((trimmed (string-trim output)))
+              (cond
+               ;; Raw format - return as-is
+               ((eq format :raw)
+                output)
+
+               ;; Empty output
+               ((string-empty-p trimmed)
+                nil)
+
+               ;; JSON array or object - parse according to format
+               ((memq (aref trimmed 0) '(?\[ ?\{))
+                (pcase format
+                  (:alist
+                   (json-parse-string output
+                                      :object-type 'alist
+                                      :array-type 'list
+                                      :null-object duckdb-query-null-value
+                                      :false-object duckdb-query-false-value))
+                  (:plist
+                   (json-parse-string output
+                                      :object-type 'plist
+                                      :array-type 'list
+                                      :null-object duckdb-query-null-value
+                                      :false-object duckdb-query-false-value))
+                  (:hash
+                   (json-parse-string output
+                                      :object-type 'hash-table
+                                      :array-type 'list
+                                      :null-object duckdb-query-null-value
+                                      :false-object duckdb-query-false-value))
+                  (:vector
+                   (json-parse-string output
+                                      :object-type 'alist
+                                      :array-type 'array
+                                      :null-object duckdb-query-null-value
+                                      :false-object duckdb-query-false-value))
+                  (:columnar
+                   (duckdb-query--to-columnar
+                    (json-parse-string output
+                                       :object-type 'alist
+                                       :array-type 'list
+                                       :null-object duckdb-query-null-value
+                                       :false-object duckdb-query-false-value)))
+                  (:org-table
+                   (duckdb-query--to-org-table
+                    (json-parse-string output
+                                       :object-type 'alist
+                                       :array-type 'list
+                                       :null-object duckdb-query-null-value
+                                       :false-object duckdb-query-false-value)))
+                  (_
+                   (error "Unknown format: %s.  Valid: :alist :plist :hash :vector :columnar :org-table :raw"
+                          format))))
+
+               ;; DuckDB error message - signal error
+               ((string-match-p
+                 "\\(?:Error\\|Exception\\|SYNTAX_ERROR\\|CATALOG_ERROR\\|BINDER_ERROR\\|PARSER_ERROR\\):"
+                 trimmed)
+                (error "DuckDB error: %s" trimmed))
+
+               ;; DDL/DML success - non-JSON, non-error output (e.g., prompt char "D")
+               ;; Return nil to indicate successful execution with no result set
+               (t
+                nil)))))
       ;; Cleanup temp files
       (maphash (lambda (_sym file)
                  (when (file-exists-p file)
