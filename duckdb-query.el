@@ -708,29 +708,37 @@ and settings persist until session is killed."
 (defun duckdb-query-session--extract-json (output)
   "Extract JSON from OUTPUT, stripping trailing prompt.
 
-DuckDB outputs JSON followed by newline and prompt \\='D \\='.
-Finds the last ] or } and returns content up to and including it.
-For non-JSON output (DDL), returns trimmed string."
+DuckDB outputs: prompt + JSON + newline + prompt.
+Example: \"D [{...}]\\nD\"
+
+Returns JSON string, or trimmed non-JSON content."
   (let ((trimmed (string-trim output)))
     (cond
      ;; Empty
      ((string-empty-p trimmed) "")
 
-     ;; Starts with [ - JSON array, find last ]
+     ;; Starts with D followed by space/bracket - strip leading prompt
+     ((and (> (length trimmed) 2)
+           (eq (aref trimmed 0) ?D)
+           (memq (aref trimmed 1) '(?\s ?\[)))
+      ;; Recurse with prompt stripped
+      (duckdb-query-session--extract-json (substring trimmed 1)))
+
+     ;; JSON array - find last ]
      ((eq (aref trimmed 0) ?\[)
       (let ((last-pos (cl-position ?\] trimmed :from-end t)))
         (if last-pos
             (substring trimmed 0 (1+ last-pos))
           trimmed)))
 
-     ;; Starts with { - JSON object, find last }
+     ;; JSON object - find last }
      ((eq (aref trimmed 0) ?\{)
       (let ((last-pos (cl-position ?\} trimmed :from-end t)))
         (if last-pos
             (substring trimmed 0 (1+ last-pos))
           trimmed)))
 
-     ;; Not JSON - return trimmed (strips "D " for DDL)
+     ;; Not JSON
      (t trimmed))))
 
 ;;;;;; Session Lifecycle
