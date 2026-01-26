@@ -661,6 +661,35 @@ Example:
   :group 'duckdb-query-session
   :package-version '(duckdb-query . "0.8.0"))
 
+;;;;;; Hooks
+
+(defvar duckdb-query-session-created-functions nil
+  "Hook run when session is created.
+
+Functions receive (NAME SESSION):
+  NAME    - Session name string
+  SESSION - `duckdb-session' struct
+
+Called after initialization completes successfully.")
+
+(defvar duckdb-query-session-killed-functions nil
+  "Hook run when session is killed.
+
+Functions receive (NAME):
+  NAME - Session name string
+
+Called after process termination and cleanup.")
+
+(defvar duckdb-query-session-query-executed-functions nil
+  "Hook run after query execution in session.
+
+Functions receive (NAME QUERY DURATION-MS):
+  NAME        - Session name string
+  QUERY       - SQL string executed
+  DURATION-MS - Execution time in milliseconds
+
+Called after successful query completion.")
+
 ;;;;;; Data Structures
 
 (cl-defstruct (duckdb-session
@@ -747,13 +776,14 @@ Returns JSON string, or trimmed non-JSON content."
   "Start session NAME with fresh temp database.
 
 NAME is string identifying the session.
-Returns `duckdb-session' struct.
 
+Returns `duckdb-session' struct.
+Fires `duckdb-query-session-created-functions' hook.
 Signals error if session NAME already exists."
   (when (gethash name duckdb-query-sessions)
     (error "Session %s already exists" name))
   (let* ((temp-db (make-temp-file "duckdb-session-" nil ".duckdb"))
-         (_ (delete-file temp-db))  ; DuckDB creates it
+         (_ (delete-file temp-db))
          (proc (start-process (format "duckdb-session-%s" name)
                               nil
                               duckdb-query-executable
@@ -771,6 +801,8 @@ Signals error if session NAME already exists."
     (set-process-filter proc (duckdb-query-session--make-filter session))
     (puthash name session duckdb-query-sessions)
     (duckdb-query-session--initialize proc session)
+    ;; Fire hook
+    (run-hook-with-args 'duckdb-query-session-created-functions name session)
     session))
 
 (defun duckdb-query-session-get (name)
@@ -778,7 +810,9 @@ Signals error if session NAME already exists."
   (gethash name duckdb-query-sessions))
 
 (defun duckdb-query-session-kill (name)
-  "Kill session NAME and delete its temp database."
+  "Kill session NAME and delete its temp database.
+
+Fires `duckdb-query-session-killed-functions' hook."
   (when-let ((session (gethash name duckdb-query-sessions)))
     (let ((proc (duckdb-session-process session))
           (temp-db (duckdb-session-temp-db session)))
@@ -786,7 +820,9 @@ Signals error if session NAME already exists."
         (delete-process proc))
       (when (and temp-db (file-exists-p temp-db))
         (delete-file temp-db)))
-    (remhash name duckdb-query-sessions)))
+    (remhash name duckdb-query-sessions)
+    ;; Fire hook
+    (run-hook-with-args 'duckdb-query-session-killed-functions name)))
 
 (defun duckdb-query-session-list ()
   "Return list of all session structs."
@@ -885,10 +921,12 @@ Uses `duckdb-query-session--extract-json' to strip trailing prompt."
 Uses file-based output for performance.  Falls back to pipe for
 DDL/DML statements that cannot use COPY.
 
+Fires `duckdb-query-session-query-executed-functions' hook.
 Returns result string."
   (let* ((session (or (gethash name duckdb-query-sessions)
                       (error "Session %s does not exist" name)))
          (proc (duckdb-session-process session))
+         (start-time (current-time))
          (result nil))
     (unless (process-live-p proc)
       (error "Session %s process is dead" name))
@@ -898,9 +936,12 @@ Returns result string."
               (duckdb-query-session--execute-via-file session query timeout)
             (duckdb-session-copy-failed
              (duckdb-query-session--execute-via-pipe session query timeout))))
-    ;; Update stats
-    (setf (duckdb-session-last-used session) (current-time))
-    (cl-incf (duckdb-session-query-count session))
+    ;; Update stats and fire hook
+    (let ((duration-ms (* 1000 (float-time (time-since start-time)))))
+      (setf (duckdb-session-last-used session) (current-time))
+      (cl-incf (duckdb-session-query-count session))
+      (run-hook-with-args 'duckdb-query-session-query-executed-functions
+                          name query duration-ms))
     result))
 ;;;;;; Scoped Session Variables
 
