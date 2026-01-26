@@ -60,6 +60,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'ansi-color)
 (require 'ob-ref)
 
 ;;;; Customization
@@ -787,6 +788,12 @@ and settings persist until session is killed."
   "Registry mapping session names to `duckdb-session' structs.")
 
 ;;;;;; Internal Helpers
+(defun duckdb-query--strip-ansi (string)
+  "Remove ANSI escape sequences from STRING.
+Uses `ansi-color-filter-apply' to strip SGR control sequences
+that DuckDB CLI outputs for colored error messages."
+  (when string
+    (ansi-color-filter-apply string)))
 
 (defun duckdb-query-session--make-filter (session)
   "Create process filter accumulating output in SESSION."
@@ -945,12 +952,13 @@ Signals `duckdb-query-session-copy-failed' if COPY fails."
             (unless found
               (setf (duckdb-session-status session) 'error)
               (error "Query timed out after %d seconds" timeout))
-            ;; Check for errors after marker found
-            (when (string-match-p
-                   "\\(?:Error\\|Exception\\|SYNTAX_ERROR\\|CATALOG_ERROR\\|BINDER_ERROR\\|PARSER_ERROR\\):"
-                   (duckdb-session-output session))
-              (signal 'duckdb-query-session-copy-failed
-                      (list (duckdb-session-output session))))
+            ;; Check for errors after marker found - strip ANSI codes first
+            (let ((clean-output (duckdb-query--strip-ansi
+                                 (duckdb-session-output session))))
+              (when (string-match-p
+                     "\\(?:Error\\|Exception\\|SYNTAX_ERROR\\|CATALOG_ERROR\\|BINDER_ERROR\\|PARSER_ERROR\\):"
+                     clean-output)
+                (signal 'duckdb-query-session-copy-failed (list clean-output))))
             ;; Read result from file
             (if (and (file-exists-p temp-file)
                      (> (file-attribute-size (file-attributes temp-file)) 0))
@@ -984,11 +992,12 @@ Uses `duckdb-query-session--extract-json' to strip trailing prompt."
       (unless found
         (setf (duckdb-session-status session) 'error)
         (error "Query timed out after %d seconds" timeout)))
-    ;; Extract and clean result using Phase 1's extraction function
-    (duckdb-query-session--extract-json
-     (substring (duckdb-session-output session)
-                0
-                (string-search marker (duckdb-session-output session))))))
+    ;; Extract and clean result - strip ANSI codes
+    (duckdb-query--strip-ansi
+     (duckdb-query-session--extract-json
+      (substring (duckdb-session-output session)
+                 0
+                 (string-search marker (duckdb-session-output session)))))))
 
 ;;;;;; Unified Execution with Fallback
 
@@ -1977,8 +1986,8 @@ Uses `duckdb-query--substitute-org-refs' for @org: replacement."
                ;; DuckDB error message - signal error
                ((string-match-p
                  "\\(?:Error\\|Exception\\|SYNTAX_ERROR\\|CATALOG_ERROR\\|BINDER_ERROR\\|PARSER_ERROR\\):"
-                 trimmed)
-                (error "DuckDB error: %s" trimmed))
+                 (duckdb-query--strip-ansi trimmed))
+                (error "DuckDB error: %s" (duckdb-query--strip-ansi trimmed)))
 
                ;; DDL/DML success - non-JSON, non-error output (e.g., prompt char "D")
                ;; Return nil to indicate successful execution with no result set
