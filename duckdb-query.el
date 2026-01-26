@@ -798,8 +798,8 @@ Signals error if session NAME already exists."
 ;;;;;; Error Condition for Fallback
 
 (define-error 'duckdb-session-copy-failed
-  "Session COPY strategy failed, fallback to pipe"
-  'error)
+              "Session COPY strategy failed, fallback to pipe"
+              'error)
 
 ;;;;;; File-Based Execution
 
@@ -902,18 +902,81 @@ Returns result string."
     (setf (duckdb-session-last-used session) (current-time))
     (cl-incf (duckdb-session-query-count session))
     result))
+;;;;;; Scoped Session Variables
+
+(defvar-local duckdb-query--current-session nil
+  "Current session name for scoped execution.
+Bound by `duckdb-with-session'.")
+
+;;;;;; Scoped Execution Macros
+
+(defmacro duckdb-with-session (name &rest body)
+  "Execute BODY with queries routed to session NAME.
+
+Session must exist (created via `duckdb-query-session-start').
+Session persists after BODY completes.
+
+Within BODY, `duckdb-query' calls without explicit :executor
+automatically use the session.
+
+Example:
+  (duckdb-query-session-start \"work\")
+  (duckdb-with-session \"work\"
+    (duckdb-query \"CREATE TABLE t AS SELECT 1\")
+    (duckdb-query \"SELECT * FROM t\"))
+  (duckdb-query-session-kill \"work\")"
+  (declare (indent 1) (debug t))
+  (let ((name-sym (make-symbol "session-name")))
+    `(let* ((,name-sym ,name)
+            (duckdb-query--current-session ,name-sym))
+       (unless (duckdb-query-session-get ,name-sym)
+         (error "Session %s does not exist" ,name-sym))
+       ,@body)))
+
+(defmacro duckdb-with-transient-session (&rest body)
+  "Execute BODY with temporary session, killed after completion.
+
+Creates anonymous session, executes BODY, kills session.
+Temp database is deleted automatically.
+
+Example:
+  (duckdb-with-transient-session
+    (duckdb-query \"CREATE TABLE t AS SELECT 1\")
+    (duckdb-query \"SELECT * FROM t\"))"
+  (declare (indent 0) (debug t))
+  (let ((name-sym (make-symbol "transient-name")))
+    `(let ((,name-sym (format "transient-%s" (md5 (format "%s" (current-time))))))
+       (duckdb-query-session-start ,name-sym)
+       (unwind-protect
+           (let ((duckdb-query--current-session ,name-sym))
+             ,@body)
+         (duckdb-query-session-kill ,name-sym)))))
+
+;;;;;; Executor Auto-Resolution
+
+(defun duckdb-query--resolve-executor (explicit-executor)
+  "Resolve executor from EXPLICIT-EXECUTOR or session context.
+
+Returns :session if inside `duckdb-with-session' scope,
+otherwise returns EXPLICIT-EXECUTOR or :cli."
+  (cond
+   (explicit-executor explicit-executor)
+   (duckdb-query--current-session :session)
+   (t :cli)))
+
 ;;;;;; Executor Integration
 
 (cl-defmethod duckdb-query-execute ((_executor (eql :session)) query &rest args)
   "Execute QUERY via named session.
 
 ARGS supports:
-  :session - Session name string (required)
-  :timeout - Query timeout seconds (default `duckdb-query-default-timeout')
+  :session - Session name (uses `duckdb-query--current-session' if nil)
+  :timeout - Query timeout seconds
 
-Session must be started via `duckdb-query-session-start' first."
+Session must exist or be in scope via `duckdb-with-session'."
   (let ((session-name (or (plist-get args :session)
-                          (error ":session argument required for session executor")))
+                          duckdb-query--current-session
+                          (error "No session specified and not in session scope")))
         (timeout (or (plist-get args :timeout)
                      duckdb-query-default-timeout)))
     (duckdb-query-session-execute session-name query timeout)))
@@ -1448,7 +1511,7 @@ Called by `duckdb-query' when DATA parameter is provided."
                               database
                               timeout
                               (format :alist)
-                              (executor :cli)
+                              (executor nil)
                               (output-via :file)
                               data
                               (data-format :json)
@@ -1544,7 +1607,8 @@ Examples:
 Uses `duckdb-query-execute' for execution dispatch.
 Uses `duckdb-query--substitute-data-refs' for @symbol replacement.
 Uses `duckdb-query--substitute-org-refs' for @org: replacement."
-  (let* ((temp-files (make-hash-table :test 'eq))
+  (let* ((executor (duckdb-query--resolve-executor executor))
+         (temp-files (make-hash-table :test 'eq))
          ;; First: resolve @org: references
          (org-resolved-query (duckdb-query--substitute-org-refs query temp-files))
          ;; Then: substitute @data references
