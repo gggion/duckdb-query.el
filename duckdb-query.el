@@ -910,7 +910,7 @@ Fires `duckdb-query-session-killed-functions' hook."
 
 ;;;;;; Error Condition for Fallback
 
-(define-error 'duckdb-session-copy-failed
+(define-error 'duckdb-query-session-copy-failed
               "Session COPY strategy failed, fallback to pipe"
               'error)
 
@@ -920,7 +920,7 @@ Fires `duckdb-query-session-killed-functions' hook."
   "Execute QUERY in SESSION using COPY TO temp file.
 
 Returns JSON string from file.
-Signals `duckdb-session-copy-failed' if COPY fails."
+Signals `duckdb-query-session-copy-failed' if COPY fails."
   (let* ((proc (duckdb-session-process session))
          (temp-file (make-temp-file "duckdb-session-result-" nil ".json"))
          (marker (format "DUCKDB_FILE_COMPLETE_%s"
@@ -949,7 +949,7 @@ Signals `duckdb-session-copy-failed' if COPY fails."
             (when (string-match-p
                    "\\(?:Error\\|Exception\\|SYNTAX_ERROR\\|CATALOG_ERROR\\|BINDER_ERROR\\|PARSER_ERROR\\):"
                    (duckdb-session-output session))
-              (signal 'duckdb-session-copy-failed
+              (signal 'duckdb-query-session-copy-failed
                       (list (duckdb-session-output session))))
             ;; Read result from file
             (if (and (file-exists-p temp-file)
@@ -1011,7 +1011,7 @@ Returns result string."
     (setq result
           (condition-case _err
               (duckdb-query-session--execute-via-file session query timeout)
-            (duckdb-session-copy-failed
+            (duckdb-query-session-copy-failed
              (duckdb-query-session--execute-via-pipe session query timeout))))
     ;; Update stats and fire hook
     (let ((duration-ms (* 1000 (float-time (time-since start-time)))))
