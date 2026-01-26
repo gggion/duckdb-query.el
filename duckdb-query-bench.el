@@ -789,6 +789,167 @@ Also see individual benchmark functions for focused testing."
 
     (cons '(benchmark category mean min max n) (nreverse rows))))
 
+;;;;
+(cl-defun duckdb-query-bench-data-serialization
+    (&optional data &key
+               (iterations duckdb-query-bench-iterations)
+               (sizes '(100 1000 5000 10000))
+               (query "SELECT COUNT(*) FROM @data"))
+  "Benchmark data parameter serialization performance.
+
+DATA is optional alist data to benchmark.  When provided, SIZES is
+ignored and only DATA is tested.  When nil, generate test data at
+each size in SIZES.
+
+ITERATIONS is number of repetitions per test.
+SIZES is list of row counts to test when DATA is nil.
+QUERY is SQL to execute against the data.
+
+Return org-table with columns:
+  rows       - Number of rows in data
+  json-ms    - Time with :data-format :json
+  csv-ms     - Time with :data-format :csv
+  json-qps   - Queries per second with JSON
+  csv-qps    - Queries per second with CSV
+  speedup    - JSON speedup over CSV
+
+Measures complete roundtrip:
+    serialization + file write + DuckDB read + query execution.
+
+Use to determine if your data size benefits from
+JSON (default) or if CSV is acceptable for compatibility.
+
+Example with custom data:
+
+  (let ((my-data (load-application-data)))
+    (duckdb-query-bench-data-serialization my-data :iterations 5))
+
+Example comparing sizes:
+
+  (duckdb-query-bench-data-serialization nil :sizes \\='(1000 5000 10000 50000))
+
+Also see `duckdb-query-bench-data-formats' for simpler comparison.
+Also see `duckdb-query' parameters `:data' and `:data-format'."
+  (let ((results nil))
+    (if data
+        ;; User provided data - benchmark it directly
+        (let* ((row-count (length data))
+               (json-times nil)
+               (csv-times nil))
+          (dotimes (_ iterations)
+            (garbage-collect)
+            (let ((start (current-time)))
+              (duckdb-query query :data data :data-format :json)
+              (push (float-time (time-subtract (current-time) start)) json-times)))
+          (dotimes (_ iterations)
+            (garbage-collect)
+            (let ((start (current-time)))
+              (duckdb-query query :data data :data-format :csv)
+              (push (float-time (time-subtract (current-time) start)) csv-times)))
+          (let ((json-mean (/ (apply #'+ json-times) (float iterations)))
+                (csv-mean (/ (apply #'+ csv-times) (float iterations))))
+            (push (list row-count
+                        (format "%.1f" (* 1000 json-mean))
+                        (format "%.1f" (* 1000 csv-mean))
+                        (format "%.0f" (/ 1.0 json-mean))
+                        (format "%.0f" (/ 1.0 csv-mean))
+                        (format "%.2fx" (/ csv-mean json-mean)))
+                  results)))
+      ;; Generate data at each size
+      (dolist (size sizes)
+        (let ((test-data (duckdb-query-bench--generate-data size))
+              (json-times nil)
+              (csv-times nil))
+          (dotimes (_ iterations)
+            (garbage-collect)
+            (let ((start (current-time)))
+              (duckdb-query query :data test-data :data-format :json)
+              (push (float-time (time-subtract (current-time) start)) json-times)))
+          (dotimes (_ iterations)
+            (garbage-collect)
+            (let ((start (current-time)))
+              (duckdb-query query :data test-data :data-format :csv)
+              (push (float-time (time-subtract (current-time) start)) csv-times)))
+          (let ((json-mean (/ (apply #'+ json-times) (float iterations)))
+                (csv-mean (/ (apply #'+ csv-times) (float iterations))))
+            (push (list size
+                        (format "%.1f" (* 1000 json-mean))
+                        (format "%.1f" (* 1000 csv-mean))
+                        (format "%.0f" (/ 1.0 json-mean))
+                        (format "%.0f" (/ 1.0 csv-mean))
+                        (format "%.2fx" (/ csv-mean json-mean)))
+                  results)))))
+    (cons '(rows json-ms csv-ms json-qps csv-qps speedup) (nreverse results))))
+
+(cl-defun duckdb-query-bench-data-complexity
+    (&key (iterations duckdb-query-bench-iterations)
+          (row-count 1000))
+  "Benchmark data serialization with varying structure complexity.
+
+ITERATIONS is number of repetitions per test.
+ROW-COUNT is number of rows for each complexity level.
+
+Tests three complexity levels:
+  flat    - Simple columns (id, name, value)
+  nested  - Includes nested alist (metadata struct)
+  arrays  - Includes list values (tags array)
+
+Return org-table comparing serialization time across complexities.
+
+Use to understand how nested structures in your Elisp data affect
+serialization performance.  JSON handles nested structures natively;
+CSV requires prin1 serialization which doesn't roundtrip.
+
+Also see `duckdb-query-bench-data-serialization' for size scaling."
+  (let ((results nil))
+    ;; Flat data
+    (let ((flat-data (cl-loop for i from 1 to row-count
+                              collect `((id . ,i)
+                                        (name . ,(format "name_%d" i))
+                                        (value . ,(* i 1.5))))))
+      (let ((stats (duckdb-query-bench--measure
+                    iterations
+                    (lambda ()
+                      (duckdb-query "SELECT COUNT(*) FROM @data"
+                                    :data flat-data
+                                    :data-format :json)))))
+        (push (duckdb-query-bench--stats-to-row "flat" stats) results)))
+
+    ;; Nested data (alist within alist)
+    (let ((nested-data (cl-loop for i from 1 to row-count
+                                collect `((id . ,i)
+                                          (name . ,(format "name_%d" i))
+                                          (metadata . ((created . ,(format "2024-%02d-%02d"
+                                                                           (1+ (mod i 12))
+                                                                           (1+ (mod i 28))))
+                                                       (score . ,(mod i 100))
+                                                       (active . ,(= 0 (mod i 2)))))))))
+      (let ((stats (duckdb-query-bench--measure
+                    iterations
+                    (lambda ()
+                      (duckdb-query "SELECT COUNT(*) FROM @data"
+                                    :data nested-data
+                                    :data-format :json)))))
+        (push (duckdb-query-bench--stats-to-row "nested" stats) results)))
+
+    ;; Array data (lists as values)
+    (let ((array-data (cl-loop for i from 1 to row-count
+                               collect `((id . ,i)
+                                         (name . ,(format "name_%d" i))
+                                         (tags . (,(format "tag_%d" (mod i 5))
+                                                  ,(format "cat_%d" (mod i 3))
+                                                  ,(format "grp_%d" (mod i 7))))))))
+      (let ((stats (duckdb-query-bench--measure
+                    iterations
+                    (lambda ()
+                      (duckdb-query "SELECT COUNT(*) FROM @data"
+                                    :data array-data
+                                    :data-format :json)))))
+        (push (duckdb-query-bench--stats-to-row "arrays" stats) results)))
+
+    (cons '(complexity mean min max n) (nreverse results))))
+
+
 (provide 'duckdb-query-bench)
 
 ;;; duckdb-query-bench.el ends here
