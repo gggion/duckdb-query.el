@@ -52,7 +52,7 @@
 ;;; Customization
 
 (defgroup duckdb-query-bench nil
-  "Benchmarking for duckdb-query package."
+  "Benchmarking for `duckdb-query' package."
   :group 'duckdb-query
   :prefix "duckdb-query-bench-")
 
