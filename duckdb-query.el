@@ -704,6 +704,7 @@ and settings persist until session is killed."
   (process nil :documentation "Emacs process object.")
   (output "" :documentation "Accumulated process output.")
   (status 'active :documentation "Status: active, error, initializing.")
+  (owners nil :documentation "List of buffers owning this session.")
   (created-at nil :documentation "Creation timestamp.")
   (last-used nil :documentation "Most recent query timestamp.")
   (query-count 0 :documentation "Total queries executed."))
@@ -1021,6 +1022,96 @@ Session must exist or be in scope via `duckdb-with-session'."
         (timeout (or (plist-get args :timeout)
                      duckdb-query-default-timeout)))
     (duckdb-query-session-execute session-name query timeout)))
+;;;;;; Ownership Management
+
+(defun duckdb-query-session-register-owner (name buffer)
+  "Register BUFFER as owner of session NAME.
+
+Session won't be auto-killed while it has owners.
+Owner is automatically unregistered when buffer is killed.
+
+Returns session struct."
+  (let ((session (or (gethash name duckdb-query-sessions)
+                     (error "Session %s does not exist" name))))
+    (unless (memq buffer (duckdb-session-owners session))
+      (push buffer (duckdb-session-owners session))
+      (with-current-buffer buffer
+        (add-hook 'kill-buffer-hook
+                  (lambda ()
+                    (duckdb-query-session-unregister-owner name (current-buffer)))
+                  nil t)))
+    session))
+
+(defun duckdb-query-session-unregister-owner (name buffer)
+  "Unregister BUFFER as owner of session NAME."
+  (when-let ((session (gethash name duckdb-query-sessions)))
+    (setf (duckdb-session-owners session)
+          (delq buffer (duckdb-session-owners session)))))
+;;;;;; Interactive Commands
+
+;;;###autoload
+(defun duckdb-query-session-display-status ()
+  "Display status of all sessions."
+  (interactive)
+  (let ((sessions (duckdb-query-session-list)))
+    (if (null sessions)
+        (message "No active sessions")
+      (with-help-window "*DuckDB Sessions*"
+        (princ "DuckDB Sessions\n")
+        (princ (make-string 50 ?=))
+        (princ "\n\n")
+        (dolist (session sessions)
+          (princ (format "Session: %s\n" (duckdb-session-name session)))
+          (princ (format "  Status:  %s\n" (duckdb-session-status session)))
+          (princ (format "  Queries: %d\n" (duckdb-session-query-count session)))
+          (princ (format "  Process: %s\n"
+                         (if (process-live-p (duckdb-session-process session))
+                             "alive" "dead")))
+          (princ (format "  Created: %s\n"
+                         (format-time-string "%H:%M:%S"
+                                             (duckdb-session-created-at session))))
+          (princ "\n"))))))
+
+;;;###autoload
+(defun duckdb-query-session-kill-interactive (name)
+  "Interactively kill session NAME."
+  (interactive
+   (list (completing-read "Kill session: "
+                          (mapcar #'duckdb-session-name
+                                  (duckdb-query-session-list))
+                          nil t)))
+  (duckdb-query-session-kill name)
+  (message "Killed session %s" name))
+
+;;;###autoload
+(defun duckdb-query-session-kill-all ()
+  "Kill all sessions."
+  (interactive)
+  (let ((count 0))
+    (maphash (lambda (name _session)
+               (duckdb-query-session-kill name)
+               (cl-incf count))
+             (copy-hash-table duckdb-query-sessions))
+    (message "Killed %d session(s)" count)))
+
+;;;;;; Mode Integration Helper
+
+(defun duckdb-query-session-setup-buffer (session-name)
+  "Setup current buffer for session SESSION-NAME.
+
+Creates session if needed and registers buffer as owner.
+Sets `duckdb-query--current-session' buffer-locally.
+
+Call from mode hooks:
+  (add-hook \\='my-mode-hook
+            (lambda ()
+              (duckdb-query-session-setup-buffer \"my-session\")))"
+  (unless (duckdb-query-session-get session-name)
+    (duckdb-query-session-start session-name))
+  (duckdb-query-session-register-owner session-name (current-buffer))
+  (setq-local duckdb-query--current-session session-name)
+  (duckdb-query-session-get session-name))
+
 ;;;;; Function Executors
 
 (cl-defmethod duckdb-query-execute ((executor function) query &rest args)
