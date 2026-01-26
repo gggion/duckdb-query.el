@@ -379,36 +379,76 @@ Also see `duckdb-query-session-attach' for manual attachment."
   "Execute BODY with temporary file-based database.
 
 Create temporary database file, execute BODY with that database as
-default, then delete the file.  Unlike in-memory databases, temporary
-file databases persist across multiple CLI invocations within BODY,
-enabling queries that build on previous results.
+context, then delete the file.
+
+Behavior depends on execution context:
+
+Outside session scope:
+  Bind `duckdb-query-default-database' to temp file.
+  All `duckdb-query' calls use this database via CLI executor.
+  Each query spawns new DuckDB process but shares database state.
+
+Within session scope (inside `duckdb-with-session'):
+  ATTACH temp database to session with auto-generated alias.
+  Execute BODY with database available via alias.
+  DETACH and delete temp file after BODY completes.
+  Access tables as _temp_N.table_name (alias shown in return).
 
 Return value of last form in BODY.
 
 The temporary database file is deleted even if BODY signals error.
 
-Example:
+Example outside session:
 
   (duckdb-with-transient-database
     (duckdb-query \"CREATE TABLE temp (id INTEGER)\" :readonly nil)
     (duckdb-query \"INSERT INTO temp VALUES (1), (2), (3)\" :readonly nil)
     (duckdb-query \"SELECT COUNT(*) as count FROM temp\"))
-  ;; => (((\"count\" . 3)))
+  ;; => (((count . 3)))
 
-Note: Cannot use in-memory database because each CLI invocation creates
-separate process with separate \":memory:\" database.  File-based approach
-ensures state persists across queries."
+Example within session:
+
+  (duckdb-with-session \"work\"
+    (duckdb-with-transient-database
+      ;; Temp database attached, tables accessible
+      (duckdb-query \"CREATE TABLE scratch AS SELECT 1 as val\")
+      (duckdb-query \"SELECT * FROM scratch\")))
+  ;; Temp database automatically detached and deleted
+
+Note: For session-scoped temporary state that doesn't need file
+persistence, consider using the session's built-in temp database
+directly (tables created in session persist until session killed).
+
+Also see `duckdb-with-database' for named database files.
+Also see `duckdb-with-transient-session' for ephemeral sessions."
   (declare (indent 0) (debug t))
-  (let ((db-var (make-symbol "transient-db")))
+  (let ((db-var (make-symbol "transient-db"))
+        (alias-var (make-symbol "transient-alias")))
     `(let ((,db-var (expand-file-name
                      (concat (make-temp-name "duckdb-transient-")
                              ".duckdb")
                      temporary-file-directory)))
-       (unwind-protect
-           (let ((duckdb-query-default-database ,db-var))
-             ,@body)
-         (when (file-exists-p ,db-var)
-           (delete-file ,db-var))))))
+       (if duckdb-query--current-session
+           ;; Session context: ATTACH/DETACH
+           (let ((,alias-var (duckdb-query-session-attach
+                              duckdb-query--current-session
+                              ,db-var
+                              nil    ; auto-generate alias
+                              nil))) ; writable
+             (unwind-protect
+                 (progn ,@body)
+               (ignore-errors
+                 (duckdb-query-session-detach
+                  duckdb-query--current-session
+                  ,alias-var))
+               (when (file-exists-p ,db-var)
+                 (delete-file ,db-var))))
+         ;; CLI context: bind default database
+         (unwind-protect
+             (let ((duckdb-query-default-database ,db-var))
+               ,@body)
+           (when (file-exists-p ,db-var)
+             (delete-file ,db-var)))))))
 
 ;;;; Interactive Functions
 
@@ -693,7 +733,7 @@ Example:
         \\='(\"INSTALL spatial\" \"LOAD spatial\"))"
   :type '(repeat string)
   :group 'duckdb-query-session
-  :package-version '(duckdb-query . "0.8.0"))
+  :package-version '(duckdb-query . "0.7.0"))
 
 ;;;;;; Hooks
 
@@ -1048,11 +1088,11 @@ otherwise returns EXPLICIT-EXECUTOR or :cli."
   "Execute QUERY via named session.
 
 ARGS supports:
-  :session - Session name (uses `duckdb-query--current-session' if nil)
+  :name    - Session name (uses `duckdb-query--current-session' if nil)
   :timeout - Query timeout seconds
 
 Session must exist or be in scope via `duckdb-with-session'."
-  (let ((session-name (or (plist-get args :session)
+  (let ((session-name (or (plist-get args :name)
                           duckdb-query--current-session
                           (error "No session specified and not in session scope")))
         (timeout (or (plist-get args :timeout)
