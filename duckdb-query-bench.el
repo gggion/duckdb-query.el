@@ -43,6 +43,7 @@
 ;; - `duckdb-query-bench-runner' - Run complete benchmark suite
 ;; - `duckdb-query-bench-query' - Benchmark custom query
 
+
 ;;; Code:
 
 (require 'duckdb-query)
@@ -113,6 +114,273 @@
   "Generate query with nested STRUCT types, ROWS rows."
   (let ((n (or rows duckdb-query-bench-default-rows)))
     (format "SELECT i, {'x': i, 'y': i*2}::STRUCT(x INT, y INT) as point, [i, i+1, i+2] as arr FROM range(%d) t(i)" n)))
+
+;;; Session Executor Benchmarks
+
+(cl-defun duckdb-query-bench-executor-comparison
+    (&optional query &key (iterations duckdb-query-bench-iterations) (queries-per-iteration 10))
+  "Compare :cli vs :session executor for QUERY.
+
+QUERY is SQL string to execute.  When nil, use simple SELECT query.
+ITERATIONS is number of measurement rounds.
+QUERIES-PER-ITERATION is number of queries per round.
+
+Return org-table data with CLI times, session times, and speedup.
+Measures total round time and per-query latency.
+
+Use to quantify session executor benefit for your workload.
+
+Also see `duckdb-query-bench-high-frequency' for sustained load testing."
+  (let* ((query (or query "SELECT 42 AS answer"))
+         (cli-times nil)
+         (session-times nil))
+    ;; Measure CLI executor
+    (dotimes (_ iterations)
+      (garbage-collect)
+      (let ((start (current-time)))
+        (dotimes (_ queries-per-iteration)
+          (duckdb-query query :executor :cli))
+        (push (float-time (time-subtract (current-time) start)) cli-times)))
+    ;; Measure session executor
+    (duckdb-query-with-transient-session
+      (duckdb-query query) ; warmup
+      (dotimes (_ iterations)
+        (garbage-collect)
+        (let ((start (current-time)))
+          (dotimes (_ queries-per-iteration)
+            (duckdb-query query))
+          (push (float-time (time-subtract (current-time) start)) session-times))))
+    ;; Compute statistics
+    (let* ((cli-mean (/ (apply #'+ cli-times) (float iterations)))
+           (session-mean (/ (apply #'+ session-times) (float iterations)))
+           (cli-per-query (* 1000 (/ cli-mean queries-per-iteration)))
+           (session-per-query (* 1000 (/ session-mean queries-per-iteration)))
+           (speedup (/ cli-mean session-mean)))
+      (list '(metric cli session speedup)
+            (list "total (ms)"
+                  (format "%.1f" (* 1000 cli-mean))
+                  (format "%.1f" (* 1000 session-mean))
+                  (format "%.1fx" speedup))
+            (list "per-query (ms)"
+                  (format "%.2f" cli-per-query)
+                  (format "%.2f" session-per-query)
+                  (format "%.1fx" speedup))
+            (list "queries/sec"
+                  (format "%.0f" (/ queries-per-iteration cli-mean))
+                  (format "%.0f" (/ queries-per-iteration session-mean))
+                  "")))))
+
+(cl-defun duckdb-query-bench-high-frequency
+    (&key (duration-seconds 5) (query "SELECT 42") session-name)
+  "Measure sustained query throughput over DURATION-SECONDS.
+
+QUERY is SQL string to execute repeatedly.
+DURATION-SECONDS is how long to run the test.
+SESSION-NAME when provided uses existing session; otherwise creates transient.
+
+Return plist with:
+  :total-queries   - Number of queries executed
+  :queries-per-sec - Average throughput
+  :latencies-ms    - Vector of individual query latencies
+  :p50-ms          - Median latency
+  :p95-ms          - 95th percentile latency
+  :p99-ms          - 99th percentile latency
+  :max-ms          - Maximum latency
+
+Use for profiling real-time query workloads where consistent low latency
+matters more than average performance.
+
+Also see `duckdb-query-bench-executor-comparison' for CLI vs session."
+  (let ((latencies nil)
+        (executor-fn (when session-name
+                       (lambda ()
+                         (duckdb-query query :executor :session :name session-name)))))
+    (if session-name
+        ;; Use provided session
+        (let ((end-time (time-add (current-time) (seconds-to-time duration-seconds))))
+          (while (time-less-p (current-time) end-time)
+            (let ((start (current-time)))
+              (funcall executor-fn)
+              (push (* 1000 (float-time (time-subtract (current-time) start)))
+                    latencies))))
+      ;; Create transient session
+      (duckdb-query-with-transient-session
+        (duckdb-query query) ; warmup
+        (let ((end-time (time-add (current-time) (seconds-to-time duration-seconds))))
+          (while (time-less-p (current-time) end-time)
+            (let ((start (current-time)))
+              (duckdb-query query)
+              (push (* 1000 (float-time (time-subtract (current-time) start)))
+                    latencies))))))
+    ;; Compute percentiles
+    (let* ((sorted (sort (vconcat latencies) #'<))
+           (n (length sorted))
+           (p50-idx (floor (* n 0.50)))
+           (p95-idx (floor (* n 0.95)))
+           (p99-idx (floor (* n 0.99))))
+      (list :total-queries n
+            :queries-per-sec (/ (float n) duration-seconds)
+            :latencies-ms sorted
+            :p50-ms (aref sorted p50-idx)
+            :p95-ms (aref sorted p95-idx)
+            :p99-ms (aref sorted p99-idx)
+            :max-ms (aref sorted (1- n))))))
+
+(cl-defun duckdb-query-bench-read-write-workload
+    (&key (duration-seconds 5) (read-ratio 0.8) (table-rows 1000))
+  "Benchmark mixed read/write workload simulating real application.
+
+DURATION-SECONDS is test duration.
+READ-RATIO is fraction of operations that are reads (0.0-1.0).
+TABLE-ROWS is initial table size.
+
+Simulates workload with:
+- Reads: SELECT with random WHERE clause
+- Writes: INSERT single row
+
+Return plist with operation counts, throughput, and latency percentiles
+broken down by operation type.
+
+Use to profile workloads that combine frequent reads with occasional writes."
+  (let ((read-latencies nil)
+        (write-latencies nil)
+        (next-id (1+ table-rows)))
+    (duckdb-query-with-transient-session
+      ;; Setup table
+      (duckdb-query (format "CREATE TABLE bench_rw AS
+                             SELECT i AS id, 'value_' || i AS data, random() AS score
+                             FROM generate_series(1, %d) t(i)"
+                            table-rows))
+      ;; Run mixed workload
+      (let ((end-time (time-add (current-time) (seconds-to-time duration-seconds))))
+        (while (time-less-p (current-time) end-time)
+          (let ((start (current-time))
+                (is-read (< (random 100) (* 100 read-ratio))))
+            (if is-read
+                (progn
+                  (duckdb-query (format "SELECT * FROM bench_rw WHERE id = %d"
+                                        (1+ (random table-rows))))
+                  (push (* 1000 (float-time (time-subtract (current-time) start)))
+                        read-latencies))
+              (progn
+                (duckdb-query (format "INSERT INTO bench_rw VALUES (%d, 'new_%d', %f)"
+                                      next-id next-id (/ (random 1000) 1000.0)))
+                (cl-incf next-id)
+                (push (* 1000 (float-time (time-subtract (current-time) start)))
+                      write-latencies))))))
+      ;; Compute statistics
+      (let* ((read-sorted (sort (vconcat read-latencies) #'<))
+             (write-sorted (sort (vconcat write-latencies) #'<))
+             (read-n (length read-sorted))
+             (write-n (length write-sorted))
+             (total-n (+ read-n write-n)))
+        (list :total-ops total-n
+              :ops-per-sec (/ (float total-n) duration-seconds)
+              :read-ops read-n
+              :write-ops write-n
+              :actual-read-ratio (/ (float read-n) total-n)
+              :read-p50-ms (when (> read-n 0) (aref read-sorted (floor (* read-n 0.5))))
+              :read-p95-ms (when (> read-n 0) (aref read-sorted (floor (* read-n 0.95))))
+              :write-p50-ms (when (> write-n 0) (aref write-sorted (floor (* write-n 0.5))))
+              :write-p95-ms (when (> write-n 0) (aref write-sorted (floor (* write-n 0.95)))))))))
+
+(cl-defun duckdb-query-bench-batch-operations
+    (&key (batch-sizes '(1 10 50 100 500)) (rows-per-batch 1000) (iterations 3))
+  "Benchmark batch INSERT performance at various batch sizes.
+
+BATCH-SIZES is list of rows per INSERT statement to test.
+ROWS-PER-BATCH is total rows to insert per test.
+ITERATIONS is measurement repetitions.
+
+Return org-table comparing throughput at each batch size.
+
+Use to find optimal batch size for bulk data loading operations."
+  (let ((results nil))
+    (dolist (batch-size batch-sizes)
+      (let ((times nil)
+            (batches (ceiling rows-per-batch batch-size)))
+        (dotimes (_ iterations)
+          (duckdb-query-with-transient-session
+            (duckdb-query "CREATE TABLE batch_test (id INT, data VARCHAR)")
+            (garbage-collect)
+            (let ((start (current-time))
+                  (id 0))
+              (dotimes (_ batches)
+                (let ((values (mapconcat
+                               (lambda (_)
+                                 (cl-incf id)
+                                 (format "(%d, 'data_%d')" id id))
+                               (number-sequence 1 (min batch-size (- rows-per-batch (- id 1))))
+                               ", ")))
+                  (duckdb-query (concat "INSERT INTO batch_test VALUES " values))))
+              (push (float-time (time-subtract (current-time) start)) times))))
+        (let ((mean-time (/ (apply #'+ times) (float iterations))))
+          (push (list batch-size
+                      (format "%.0f" (* 1000 mean-time))
+                      (format "%.0f" (/ rows-per-batch mean-time)))
+                results))))
+    (cons '(batch-size time-ms rows-per-sec) (nreverse results))))
+
+(cl-defun duckdb-query-bench-session-overhead (&key (iterations 20))
+  "Measure session startup and teardown overhead.
+
+ITERATIONS is number of session lifecycle measurements.
+
+Return plist with:
+  :startup-p50-ms  - Median startup time
+  :startup-p95-ms  - 95th percentile startup time
+  :teardown-p50-ms - Median teardown time
+  :teardown-p95-ms - 95th percentile teardown time
+  :total-p50-ms    - Median full lifecycle time
+
+Use to understand fixed costs of session management."
+  (let ((startup-times nil)
+        (teardown-times nil))
+    (dotimes (_ iterations)
+      (garbage-collect)
+      (let* ((name (format "bench-%s" (random 100000)))
+             (start (current-time)))
+        (duckdb-query-session-start name)
+        (duckdb-query "SELECT 1" :executor :session :name name)
+        (push (* 1000 (float-time (time-subtract (current-time) start)))
+              startup-times)
+        (let ((kill-start (current-time)))
+          (duckdb-query-session-kill name)
+          (push (* 1000 (float-time (time-subtract (current-time) kill-start)))
+                teardown-times))))
+    (let ((startup-sorted (sort (vconcat startup-times) #'<))
+          (teardown-sorted (sort (vconcat teardown-times) #'<))
+          (n iterations))
+      (list :startup-p50-ms (aref startup-sorted (floor (* n 0.5)))
+            :startup-p95-ms (aref startup-sorted (floor (* n 0.95)))
+            :teardown-p50-ms (aref teardown-sorted (floor (* n 0.5)))
+            :teardown-p95-ms (aref teardown-sorted (floor (* n 0.95)))
+            :total-p50-ms (+ (aref startup-sorted (floor (* n 0.5)))
+                             (aref teardown-sorted (floor (* n 0.5))))))))
+
+(defun duckdb-query-bench-latency-histogram (latencies-ms &optional bucket-width)
+  "Generate histogram data from LATENCIES-MS vector.
+
+BUCKET-WIDTH is milliseconds per bucket (default 1).
+
+Return org-table with bucket ranges and counts for visualization."
+  (let* ((bucket-width (or bucket-width 1.0))
+         (max-latency (seq-max latencies-ms))
+         (buckets (make-hash-table :test 'equal))
+         (n-buckets (1+ (floor (/ max-latency bucket-width)))))
+    ;; Count into buckets
+    (seq-doseq (lat latencies-ms)
+      (let ((bucket (* bucket-width (floor (/ lat bucket-width)))))
+        (puthash bucket (1+ (gethash bucket buckets 0)) buckets)))
+    ;; Build result table
+    (cons '(range-ms count percentage)
+          (cl-loop for i from 0 below (min n-buckets 20)
+                   for bucket = (* i bucket-width)
+                   for count = (gethash bucket buckets 0)
+                   for pct = (* 100.0 (/ count (float (length latencies-ms))))
+                   collect (list (format "%.0f-%.0f" bucket (+ bucket bucket-width))
+                                 count
+                                 (format "%.1f%%" pct))))))
 
 ;;; Core Benchmarks
 
@@ -371,7 +639,8 @@ Also see `duckdb-query-bench-formats', `duckdb-query-bench-output-strategies'."
                                      (test-data t)
                                      (test-nested t)
                                      (test-schema t)
-                                     (test-extraction t))
+                                     (test-extraction t)
+                                     (test-session t))
   "Run benchmark suite on QUERIES.
 
 QUERIES is list of (LABEL . QUERY) pairs where LABEL is display name
@@ -389,6 +658,7 @@ Keyword arguments enable or disable test categories:
   TEST-NESTED     - Nested type benchmarks
   TEST-SCHEMA     - Schema introspection benchmarks
   TEST-EXTRACTION - Extraction utility benchmarks
+  TEST-SESSION    - Session executor benchmarks
 
 Return org-table data with all benchmark results.  Each row tagged
 with benchmark category and specific item tested.
@@ -484,6 +754,38 @@ Also see individual benchmark functions for focused testing."
           (push (cons "extract"
                       (duckdb-query-bench--stats-to-row "column" stats))
                 rows))))
+
+    ;; Session executor benchmarks
+    (when test-session
+      ;; CLI vs Session comparison
+      (let ((comparison (duckdb-query-bench-executor-comparison
+                         "SELECT 42" :iterations iterations :queries-per-iteration 20)))
+        (dolist (row (cdr comparison))
+          (push (cons "session/comparison" row) rows)))
+
+      ;; High-frequency latency
+      (let ((hf-result (duckdb-query-bench-high-frequency :duration-seconds 2)))
+        (push (cons "session/throughput"
+                    (list "queries/sec"
+                          (format "%.0f" (plist-get hf-result :queries-per-sec))
+                          "" "" ""))
+              rows)
+        (push (cons "session/latency"
+                    (list "p50/p95/p99 (ms)"
+                          (format "%.2f/%.2f/%.2f"
+                                  (plist-get hf-result :p50-ms)
+                                  (plist-get hf-result :p95-ms)
+                                  (plist-get hf-result :p99-ms))
+                          "" "" ""))
+              rows))
+
+      ;; Session lifecycle overhead
+      (let ((overhead (duckdb-query-bench-session-overhead :iterations 10)))
+        (push (cons "session/lifecycle"
+                    (list "startup+teardown (ms)"
+                          (format "%.1f" (plist-get overhead :total-p50-ms))
+                          "" "" ""))
+              rows)))
 
     (cons '(benchmark category mean min max n) (nreverse rows))))
 
