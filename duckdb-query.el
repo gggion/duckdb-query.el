@@ -319,16 +319,26 @@ Also see `duckdb-query-columns' for just column names."
 ;;;; Context Management Macro
 
 (defmacro duckdb-with-database (database &rest body)
-  "Execute BODY with DATABASE as default connection.
+  "Execute BODY with DATABASE as context.
 
-All `duckdb-query' calls within BODY use DATABASE unless overridden
-by explicit :database parameter.
+DATABASE is file path string, evaluated once.
 
-DATABASE is evaluated once and bound dynamically for BODY execution.
+Behavior depends on execution context:
+
+Within session scope (inside `duckdb-with-session'):
+  ATTACHes DATABASE as read-only with alias derived from filename.
+  Executes BODY with database available via alias.
+  DETACHes database after BODY completes, even on error.
+  Tables accessed as ALIAS.table_name.
+
+Outside session scope:
+  Binds `duckdb-query-default-database' to DATABASE for BODY.
+  All `duckdb-query' calls use DATABASE unless overridden by
+  explicit :database parameter.
 
 Return value of last form in BODY.
 
-Example:
+Example outside session:
 
   (duckdb-with-database \"app.db\"
     (duckdb-query \"CREATE TABLE users (id INTEGER, name TEXT)\"
@@ -336,10 +346,34 @@ Example:
     (duckdb-query \"INSERT INTO users VALUES (1, \\='Alice\\=')\"
                   :readonly nil)
     (duckdb-query \"SELECT * FROM users\"))
-  ;; => (((\"id\" . 1) (\"name\" . \"Alice\")))"
+  ;; => (((id . 1) (name . \"Alice\")))
+
+Example within session:
+
+  (duckdb-with-session \"work\"
+    (duckdb-with-database \"/path/to/sales.db\"
+      ;; sales.db attached as 'sales' (filename without extension)
+      (duckdb-query \"SELECT * FROM sales.orders\")))
+  ;; Database automatically detached after body
+
+Also see `duckdb-with-session' for session-scoped execution.
+Also see `duckdb-query-session-attach' for manual attachment."
   (declare (indent 1) (debug t))
-  `(let ((duckdb-query-default-database ,database))
-     ,@body))
+  (let ((db-sym (make-symbol "database"))
+        (alias-sym (make-symbol "alias")))
+    `(let ((,db-sym ,database))
+       (if duckdb-query--current-session
+           (let ((,alias-sym (duckdb-query-session-attach
+                              duckdb-query--current-session
+                              ,db-sym)))
+             (unwind-protect
+                 (progn ,@body)
+               (ignore-errors
+                 (duckdb-query-session-detach
+                  duckdb-query--current-session
+                  ,alias-sym))))
+         (let ((duckdb-query-default-database ,db-sym))
+           ,@body)))))
 
 (defmacro duckdb-with-transient-database (&rest body)
   "Execute BODY with temporary file-based database.
@@ -783,8 +817,10 @@ Fires `duckdb-query-session-created-functions' hook.
 Signals error if session NAME already exists."
   (when (gethash name duckdb-query-sessions)
     (error "Session %s already exists" name))
-  (let* ((temp-db (make-temp-file "duckdb-session-" nil ".duckdb"))
-         (_ (delete-file temp-db))
+  (let* ((temp-db (concat (make-temp-name
+                           (expand-file-name "duckdb-session-"
+                                             temporary-file-directory))
+                          ".duckdb"))
          (proc (start-process (format "duckdb-session-%s" name)
                               nil
                               duckdb-query-executable
@@ -1111,6 +1147,80 @@ Call from mode hooks:
   (duckdb-query-session-register-owner session-name (current-buffer))
   (setq-local duckdb-query--current-session session-name)
   (duckdb-query-session-get session-name))
+
+;;;;;; Database Attachment
+
+(defun duckdb-query-session-attach (session-name database &optional alias readonly)
+  "Attach DATABASE to session SESSION-NAME as ALIAS.
+
+DATABASE is file path to DuckDB database file.
+
+ALIAS is SQL identifier for the attached database.  When nil, defaults
+to filename without extension, sanitized for SQL (non-alphanumeric
+characters replaced with underscores).
+
+READONLY when non-nil (default t) opens database in read-only mode,
+preventing write conflicts.  Use nil for write access.
+
+Returns alias string used for attachment.
+
+Signals error if session does not exist or process is dead.
+
+Within queries, access attached tables as ALIAS.table_name.
+
+Example:
+
+  (duckdb-query-session-attach \"work\" \"/data/sales.db\")
+  ;; Returns \"sales\"
+  ;; Access as: SELECT * FROM sales.orders
+
+  (duckdb-query-session-attach \"work\" \"/data/app.db\" \"mydb\" nil)
+  ;; Returns \"mydb\", writable
+  ;; Access as: INSERT INTO mydb.logs VALUES (...)
+
+Also see `duckdb-query-session-detach' to remove attachment.
+Also see `duckdb-with-database' for scoped attachment."
+  (let* ((session (or (gethash session-name duckdb-query-sessions)
+                      (error "Session %s does not exist" session-name)))
+         (proc (duckdb-session-process session))
+         (raw-alias (or alias (file-name-base database)))
+         (alias (replace-regexp-in-string "[^a-zA-Z0-9_]" "_" raw-alias))
+         (readonly (if (memq readonly '(nil t)) (or readonly t) readonly)))
+    (unless (process-live-p proc)
+      (error "Session %s process is dead" session-name))
+    (duckdb-query-session-execute
+     session-name
+     (format "ATTACH '%s' AS %s%s"
+             (expand-file-name database)
+             alias
+             (if readonly " (READ_ONLY)" ""))
+     10)
+    alias))
+
+(defun duckdb-query-session-detach (session-name alias)
+  "Detach database ALIAS from session SESSION-NAME.
+
+ALIAS is the identifier used when attaching the database via
+`duckdb-query-session-attach' or `duckdb-with-database'.
+
+Signals error if session does not exist or ALIAS is not attached.
+
+After detaching, tables from the database are no longer accessible
+via ALIAS.table_name syntax.
+
+Example:
+
+  (duckdb-query-session-attach \"work\" \"/data/sales.db\" \"sales\")
+  ;; ... use sales.orders, sales.customers ...
+  (duckdb-query-session-detach \"work\" \"sales\")
+  ;; sales.* no longer accessible
+
+Also see `duckdb-query-session-attach' for attaching databases.
+Also see `duckdb-with-database' for automatic attach/detach."
+  (duckdb-query-session-execute
+   session-name
+   (format "DETACH %s" alias)
+   5))
 
 ;;;;; Function Executors
 
