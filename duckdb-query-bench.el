@@ -1,6 +1,6 @@
 ;;; duckdb-query-bench.el --- Benchmark suite for duckdb-query -*- lexical-binding: t; -*-
 
-;; Author: Gino Cornejo
+;; Author: Gino Cornejo <gggion123@gmail.com>
 ;; Maintainer: Gino Cornejo <gggion123@gmail.com>
 ;; Homepage: https://github.com/gggion/duckdb-query.el
 

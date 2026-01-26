@@ -1,6 +1,6 @@
 ;;; duckdb-query.el --- DuckDB query results as native Elisp data structures -*- lexical-binding: t; -*-
 ;;
-;; Author: Gino Cornejo
+;; Author: Gino Cornejo <gggion123@gmail.com>
 ;; Maintainer: Gino Cornejo <gggion123@gmail.com>
 ;; Homepage: https://github.com/gggion/duckdb-query.el
 ;; Keywords: data sql
