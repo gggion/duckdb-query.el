@@ -924,23 +924,33 @@ Fires `duckdb-query-session-killed-functions' hook."
 ;;;;;; File-Based Execution
 
 (defun duckdb-query-session--execute-via-file (session query timeout)
-  "Execute QUERY in SESSION using COPY TO temp file.
+  "Execute QUERY in SESSION using COPY TO temp file with .read for input.
 
-Returns JSON string from file.
+Writes COPY-wrapped query to temp SQL file, sends .read command to
+session to execute it, waits for completion marker.
+
+Returns JSON string from output file.
 Signals `duckdb-query-session-copy-failed' if COPY fails."
   (let* ((proc (duckdb-session-process session))
-         (temp-file (make-temp-file "duckdb-session-result-" nil ".json"))
+         (sql-file (make-temp-file "duckdb-session-query-" nil ".sql"))
+         (json-file (make-temp-file "duckdb-session-result-" nil ".json"))
          (marker (format "DUCKDB_FILE_COMPLETE_%s"
                          (md5 (format "%s%s" (duckdb-session-name session)
                                       (current-time))))))
     (unwind-protect
         (progn
+          ;; Write COPY-wrapped query to SQL file
+          (with-temp-file sql-file
+            (insert (format "COPY (\n%s\n) TO '%s' (FORMAT json, ARRAY true);\n"
+                            query json-file)))
+
           (setf (duckdb-session-output session) "")
-          ;; Send COPY-wrapped query
+
+          ;; Send .read command instead of raw query
           (process-send-string
            proc
-           (format "COPY (\n%s\n) TO '%s' (FORMAT json, ARRAY true);\n.print \"%s\"\n"
-                   query temp-file marker))
+           (format ".read '%s'\n.print \"%s\"\n" sql-file marker))
+
           ;; Wait for marker
           (let ((start (current-time))
                 (found nil))
@@ -952,52 +962,71 @@ Signals `duckdb-query-session-copy-failed' if COPY fails."
             (unless found
               (setf (duckdb-session-status session) 'error)
               (error "Query timed out after %d seconds" timeout))
-            ;; Check for errors after marker found - strip ANSI codes first
+            ;; Check for errors after marker found
             (let ((clean-output (duckdb-query--strip-ansi
                                  (duckdb-session-output session))))
               (when (string-match-p
                      "\\(?:Error\\|Exception\\|SYNTAX_ERROR\\|CATALOG_ERROR\\|BINDER_ERROR\\|PARSER_ERROR\\):"
                      clean-output)
                 (signal 'duckdb-query-session-copy-failed (list clean-output))))
-            ;; Read result from file
-            (if (and (file-exists-p temp-file)
-                     (> (file-attribute-size (file-attributes temp-file)) 0))
+            ;; Read result from JSON file
+            (if (and (file-exists-p json-file)
+                     (> (file-attribute-size (file-attributes json-file)) 0))
                 (with-temp-buffer
-                  (insert-file-contents temp-file)
+                  (insert-file-contents json-file)
                   (buffer-string))
               "[]")))
-      (when (file-exists-p temp-file)
-        (delete-file temp-file)))))
+      ;; Cleanup temp files
+      (when (file-exists-p sql-file) (delete-file sql-file))
+      (when (file-exists-p json-file) (delete-file json-file)))))
 
 ;;;;;; Pipe-Based Execution (for DDL/DML fallback)
 
 (defun duckdb-query-session--execute-via-pipe (session query timeout)
-  "Execute QUERY in SESSION using pipe-based output.
+  "Execute QUERY in SESSION using .read for input with pipe-based output.
+
+Writes query to temp SQL file, sends .read command to session.
+Used for DDL/DML statements that cannot use COPY.
 
 Returns output string (may be empty for DDL).
 Uses `duckdb-query-session--extract-json' to strip trailing prompt."
   (let* ((proc (duckdb-session-process session))
+         (sql-file (make-temp-file "duckdb-session-query-" nil ".sql"))
          (marker (format "DUCKDB_PIPE_COMPLETE_%s"
                          (md5 (format "%s%s" (duckdb-session-name session)
                                       (current-time)))))
          (start-time (current-time)))
-    (setf (duckdb-session-output session) "")
-    (process-send-string proc (format "%s;\n.print \"%s\"\n" query marker))
-    (let ((found nil))
-      (while (and (not found)
-                  (< (float-time (time-since start-time)) timeout))
-        (accept-process-output proc 0.001)
-        (when (string-search marker (duckdb-session-output session))
-          (setq found t)))
-      (unless found
-        (setf (duckdb-session-status session) 'error)
-        (error "Query timed out after %d seconds" timeout)))
-    ;; Extract and clean result - strip ANSI codes
-    (duckdb-query--strip-ansi
-     (duckdb-query-session--extract-json
-      (substring (duckdb-session-output session)
-                 0
-                 (string-search marker (duckdb-session-output session)))))))
+    (unwind-protect
+        (progn
+          ;; Write query to SQL file
+          (with-temp-file sql-file
+            (insert query)
+            (insert ";\n"))
+
+          (setf (duckdb-session-output session) "")
+
+          ;; Send .read command instead of raw query
+          (process-send-string proc (format ".read '%s'\n.print \"%s\"\n"
+                                            sql-file marker))
+
+          (let ((found nil))
+            (while (and (not found)
+                        (< (float-time (time-since start-time)) timeout))
+              (accept-process-output proc 0.001)
+              (when (string-search marker (duckdb-session-output session))
+                (setq found t)))
+            (unless found
+              (setf (duckdb-session-status session) 'error)
+              (error "Query timed out after %d seconds" timeout)))
+
+          ;; Extract and clean result - strip ANSI codes
+          (duckdb-query--strip-ansi
+           (duckdb-query-session--extract-json
+            (substring (duckdb-session-output session)
+                       0
+                       (string-search marker (duckdb-session-output session))))))
+      ;; Cleanup temp file
+      (when (file-exists-p sql-file) (delete-file sql-file)))))
 
 ;;;;;; Unified Execution with Fallback
 
