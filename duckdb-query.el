@@ -1465,7 +1465,7 @@ Called by `duckdb-query--substitute-org-refs'."
                                     ref-string (error-message-string err))))))
           (if (and (listp table-data)
                    (listp (car table-data))
-                   (not (null table-data)))
+                   table-data)
               ;; Filter out hline symbols before conversion
               (let ((clean-table (cl-remove-if (lambda (row) (eq row 'hline))
                                                table-data)))
