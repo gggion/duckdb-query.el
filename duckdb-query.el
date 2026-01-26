@@ -795,43 +795,113 @@ Signals error if session NAME already exists."
              duckdb-query-sessions)
     (nreverse result)))
 
-;;;;;; Query Execution
+;;;;;; Error Condition for Fallback
 
-(defun duckdb-query-session-execute (name query timeout)
-  "Execute QUERY in session NAME, wait up to TIMEOUT seconds.
+(define-error 'duckdb-session-copy-failed
+  "Session COPY strategy failed, fallback to pipe"
+  'error)
 
-Returns result string with JSON extracted cleanly.
-Signals error on timeout or if session doesn't exist."
-  (let* ((session (or (gethash name duckdb-query-sessions)
-                      (error "Session %s does not exist" name)))
-         (proc (duckdb-session-process session))
-         (marker (format "DUCKDB_SESSION_COMPLETE_%s"
-                         (md5 (format "%s%s" query (current-time)))))
+;;;;;; File-Based Execution
+
+(defun duckdb-query-session--execute-via-file (session query timeout)
+  "Execute QUERY in SESSION using COPY TO temp file.
+
+Returns JSON string from file.
+Signals `duckdb-session-copy-failed' if COPY fails."
+  (let* ((proc (duckdb-session-process session))
+         (temp-file (make-temp-file "duckdb-session-result-" nil ".json"))
+         (marker (format "DUCKDB_FILE_COMPLETE_%s"
+                         (md5 (format "%s%s" (duckdb-session-name session)
+                                      (current-time))))))
+    (unwind-protect
+        (progn
+          (setf (duckdb-session-output session) "")
+          ;; Send COPY-wrapped query
+          (process-send-string
+           proc
+           (format "COPY (\n%s\n) TO '%s' (FORMAT json, ARRAY true);\n.print \"%s\"\n"
+                   query temp-file marker))
+          ;; Wait for marker
+          (let ((start (current-time))
+                (found nil))
+            (while (and (not found)
+                        (< (float-time (time-since start)) timeout))
+              (accept-process-output proc 0.001)
+              (when (string-search marker (duckdb-session-output session))
+                (setq found t)))
+            (unless found
+              (setf (duckdb-session-status session) 'error)
+              (error "Query timed out after %d seconds" timeout))
+            ;; Check for errors after marker found
+            (when (string-match-p
+                   "\\(?:Error\\|Exception\\|SYNTAX_ERROR\\|CATALOG_ERROR\\|BINDER_ERROR\\|PARSER_ERROR\\):"
+                   (duckdb-session-output session))
+              (signal 'duckdb-session-copy-failed
+                      (list (duckdb-session-output session))))
+            ;; Read result from file
+            (if (and (file-exists-p temp-file)
+                     (> (file-attribute-size (file-attributes temp-file)) 0))
+                (with-temp-buffer
+                  (insert-file-contents temp-file)
+                  (buffer-string))
+              "[]")))
+      (when (file-exists-p temp-file)
+        (delete-file temp-file)))))
+
+;;;;;; Pipe-Based Execution (for DDL/DML fallback)
+
+(defun duckdb-query-session--execute-via-pipe (session query timeout)
+  "Execute QUERY in SESSION using pipe-based output.
+
+Returns output string (may be empty for DDL).
+Uses `duckdb-query-session--extract-json' to strip trailing prompt."
+  (let* ((proc (duckdb-session-process session))
+         (marker (format "DUCKDB_PIPE_COMPLETE_%s"
+                         (md5 (format "%s%s" (duckdb-session-name session)
+                                      (current-time)))))
          (start-time (current-time)))
-    (unless (process-live-p proc)
-      (error "Session %s process is dead" name))
-    ;; Clear output buffer
     (setf (duckdb-session-output session) "")
-    ;; Send query with completion marker
     (process-send-string proc (format "%s;\n.print \"%s\"\n" query marker))
-    ;; Wait for completion
     (let ((found nil))
       (while (and (not found)
                   (< (float-time (time-since start-time)) timeout))
         (accept-process-output proc 0.001)
-        (setq found (string-search marker (duckdb-session-output session))))
+        (when (string-search marker (duckdb-session-output session))
+          (setq found t)))
       (unless found
         (setf (duckdb-session-status session) 'error)
         (error "Query timed out after %d seconds" timeout)))
-    ;; Update stats
-    (setf (duckdb-session-last-used session) (current-time))
-    (cl-incf (duckdb-session-query-count session))
-    ;; Extract result before marker, then strip trailing prompt
+    ;; Extract and clean result using Phase 1's extraction function
     (duckdb-query-session--extract-json
      (substring (duckdb-session-output session)
                 0
                 (string-search marker (duckdb-session-output session))))))
 
+;;;;;; Unified Execution with Fallback
+
+(defun duckdb-query-session-execute (name query timeout)
+  "Execute QUERY in session NAME, wait up to TIMEOUT seconds.
+
+Uses file-based output for performance.  Falls back to pipe for
+DDL/DML statements that cannot use COPY.
+
+Returns result string."
+  (let* ((session (or (gethash name duckdb-query-sessions)
+                      (error "Session %s does not exist" name)))
+         (proc (duckdb-session-process session))
+         (result nil))
+    (unless (process-live-p proc)
+      (error "Session %s process is dead" name))
+    ;; Try file-based, fallback to pipe
+    (setq result
+          (condition-case _err
+              (duckdb-query-session--execute-via-file session query timeout)
+            (duckdb-session-copy-failed
+             (duckdb-query-session--execute-via-pipe session query timeout))))
+    ;; Update stats
+    (setf (duckdb-session-last-used session) (current-time))
+    (cl-incf (duckdb-session-query-count session))
+    result))
 ;;;;;; Executor Integration
 
 (cl-defmethod duckdb-query-execute ((_executor (eql :session)) query &rest args)
