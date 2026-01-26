@@ -118,6 +118,14 @@ via `duckdb-query-with-database'.
 
 Nil means in-memory transient database.")
 
+(defvar duckdb-query--transient-database-p nil
+  "Non-nil when inside `duckdb-query-with-transient-database' scope.
+
+Used by CLI executor to default to writable mode, enabling database
+file creation.  Without this, the CLI executor defaults to read-only
+mode when a database path is specified, which fails for non-existent
+databases.")
+
 ;;;; Data Extraction Utilities
 
 (defun duckdb-query-value (query &rest args)
@@ -388,6 +396,7 @@ Outside session scope:
   Bind `duckdb-query-default-database' to temp file.
   All `duckdb-query' calls use this database via CLI executor.
   Each query spawns new DuckDB process but shares database state.
+  Queries default to writable mode to enable database creation.
 
 Within session scope (inside `duckdb-query-with-session'):
   ATTACH temp database to session with auto-generated alias.
@@ -402,8 +411,8 @@ The temporary database file is deleted even if BODY signals error.
 Example outside session:
 
   (duckdb-query-with-transient-database
-    (duckdb-query \"CREATE TABLE temp (id INTEGER)\" :readonly nil)
-    (duckdb-query \"INSERT INTO temp VALUES (1), (2), (3)\" :readonly nil)
+    (duckdb-query \"CREATE TABLE temp (id INTEGER)\")
+    (duckdb-query \"INSERT INTO temp VALUES (1), (2), (3)\")
     (duckdb-query \"SELECT COUNT(*) as count FROM temp\"))
   ;; => (((count . 3)))
 
@@ -444,9 +453,10 @@ Also see `duckdb-query-with-transient-session' for ephemeral sessions."
                   ,alias-var))
                (when (file-exists-p ,db-var)
                  (delete-file ,db-var))))
-         ;; CLI context: bind default database
+         ;; CLI context: bind default database with transient flag
          (unwind-protect
-             (let ((duckdb-query-default-database ,db-var))
+             (let ((duckdb-query-default-database ,db-var)
+                   (duckdb-query--transient-database-p t))
                ,@body)
            (when (file-exists-p ,db-var)
              (delete-file ,db-var)))))))
@@ -654,7 +664,8 @@ Called by `duckdb-query-execute' `:cli' method when file output is viable."
 
 Supported ARGS:
   :database     - Database file path (nil for in-memory)
-  :readonly     - Open database read-only (default t when :database provided)
+  :readonly     - Open database read-only (default t when :database provided,
+                  except nil when inside `duckdb-query-with-transient-database')
   :timeout      - Execution timeout in seconds
   :output-via   - Output strategy: `:file' (default) or `:pipe'
   :output-mode  - DuckDB output mode (default \\='json for pipe mode)
@@ -677,7 +688,8 @@ Signal error on execution failure after fallback."
   (let* ((database (plist-get args :database))
          (readonly (if (plist-member args :readonly)
                        (plist-get args :readonly)
-                     (and database t)))
+                     ;; Default: writable for transient databases, readonly for others
+                     (and database (not duckdb-query--transient-database-p))))
          (timeout (or (plist-get args :timeout)
                       duckdb-query-default-timeout))
          (output-via (or (plist-get args :output-via) :file))
