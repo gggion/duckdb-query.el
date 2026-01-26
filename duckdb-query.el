@@ -37,7 +37,7 @@
 ;;
 ;; Database context management:
 ;;
-;;     (duckdb-with-database "app.db"
+;;     (duckdb-query-with-database "app.db"
 ;;       (duckdb-query "SELECT * FROM users"))
 ;;
 ;; The package provides:
@@ -45,8 +45,8 @@
 ;; - `duckdb-query-value' - Extract single scalar value
 ;; - `duckdb-query-column' - Extract single column as list
 ;; - `duckdb-query-describe' - Schema introspection
-;; - `duckdb-with-database' - Scoped database context
-;; - `duckdb-with-transient-database' - Temporary file-based database
+;; - `duckdb-query-with-database' - Scoped database context
+;; - `duckdb-query-with-transient-database' - Temporary file-based database
 ;;
 ;; Output formats via :format parameter:
 ;; - :alist (default), :plist, :hash, :vector, :columnar, :org-table
@@ -113,7 +113,7 @@ When non-nil, all queries use this database unless overridden by
 explicit :database parameter.
 
 Set via `duckdb-query-set-default-database' or dynamically bound
-via `duckdb-with-database'.
+via `duckdb-query-with-database'.
 
 Nil means in-memory transient database.")
 
@@ -318,14 +318,14 @@ Also see `duckdb-query-columns' for just column names."
 
 ;;;; Context Management Macro
 
-(defmacro duckdb-with-database (database &rest body)
+(defmacro duckdb-query-with-database (database &rest body)
   "Execute BODY with DATABASE as context.
 
 DATABASE is file path string, evaluated once.
 
 Behavior depends on execution context:
 
-Within session scope (inside `duckdb-with-session'):
+Within session scope (inside `duckdb-query-with-session'):
   ATTACHes DATABASE as read-only with alias derived from filename.
   Executes BODY with database available via alias.
   DETACHes database after BODY completes, even on error.
@@ -340,7 +340,7 @@ Return value of last form in BODY.
 
 Example outside session:
 
-  (duckdb-with-database \"app.db\"
+  (duckdb-query-with-database \"app.db\"
     (duckdb-query \"CREATE TABLE users (id INTEGER, name TEXT)\"
                   :readonly nil)
     (duckdb-query \"INSERT INTO users VALUES (1, \\='Alice\\=')\"
@@ -350,13 +350,13 @@ Example outside session:
 
 Example within session:
 
-  (duckdb-with-session \"work\"
-    (duckdb-with-database \"/path/to/sales.db\"
-      ;; sales.db attached as 'sales' (filename without extension)
+  (duckdb-query-with-session \"work\"
+    (duckdb-query-with-database \"/path/to/sales.db\"
+      ;; sales.db attached as \\='sales\\=' (filename without extension)
       (duckdb-query \"SELECT * FROM sales.orders\")))
   ;; Database automatically detached after body
 
-Also see `duckdb-with-session' for session-scoped execution.
+Also see `duckdb-query-with-session' for session-scoped execution.
 Also see `duckdb-query-session-attach' for manual attachment."
   (declare (indent 1) (debug t))
   (let ((db-sym (make-symbol "database"))
@@ -375,7 +375,7 @@ Also see `duckdb-query-session-attach' for manual attachment."
          (let ((duckdb-query-default-database ,db-sym))
            ,@body)))))
 
-(defmacro duckdb-with-transient-database (&rest body)
+(defmacro duckdb-query-with-transient-database (&rest body)
   "Execute BODY with temporary file-based database.
 
 Create temporary database file, execute BODY with that database as
@@ -388,7 +388,7 @@ Outside session scope:
   All `duckdb-query' calls use this database via CLI executor.
   Each query spawns new DuckDB process but shares database state.
 
-Within session scope (inside `duckdb-with-session'):
+Within session scope (inside `duckdb-query-with-session'):
   ATTACH temp database to session with auto-generated alias.
   Execute BODY with database available via alias.
   DETACH and delete temp file after BODY completes.
@@ -400,7 +400,7 @@ The temporary database file is deleted even if BODY signals error.
 
 Example outside session:
 
-  (duckdb-with-transient-database
+  (duckdb-query-with-transient-database
     (duckdb-query \"CREATE TABLE temp (id INTEGER)\" :readonly nil)
     (duckdb-query \"INSERT INTO temp VALUES (1), (2), (3)\" :readonly nil)
     (duckdb-query \"SELECT COUNT(*) as count FROM temp\"))
@@ -408,8 +408,8 @@ Example outside session:
 
 Example within session:
 
-  (duckdb-with-session \"work\"
-    (duckdb-with-transient-database
+  (duckdb-query-with-session \"work\"
+    (duckdb-query-with-transient-database
       ;; Temp database attached, tables accessible
       (duckdb-query \"CREATE TABLE scratch AS SELECT 1 as val\")
       (duckdb-query \"SELECT * FROM scratch\")))
@@ -419,8 +419,8 @@ Note: For session-scoped temporary state that doesn't need file
 persistence, consider using the session's built-in temp database
 directly (tables created in session persist until session killed).
 
-Also see `duckdb-with-database' for named database files.
-Also see `duckdb-with-transient-session' for ephemeral sessions."
+Also see `duckdb-query-with-database' for named database files.
+Also see `duckdb-query-with-transient-session' for ephemeral sessions."
   (declare (indent 0) (debug t))
   (let ((db-var (make-symbol "transient-db"))
         (alias-var (make-symbol "transient-alias")))
@@ -1024,11 +1024,11 @@ Returns result string."
 
 (defvar-local duckdb-query--current-session nil
   "Current session name for scoped execution.
-Bound by `duckdb-with-session'.")
+Bound by `duckdb-query-with-session'.")
 
 ;;;;;; Scoped Execution Macros
 
-(defmacro duckdb-with-session (name &rest body)
+(defmacro duckdb-query-with-session (name &rest body)
   "Execute BODY with queries routed to session NAME.
 
 Session must exist (created via `duckdb-query-session-start').
@@ -1039,7 +1039,7 @@ automatically use the session.
 
 Example:
   (duckdb-query-session-start \"work\")
-  (duckdb-with-session \"work\"
+  (duckdb-query-with-session \"work\"
     (duckdb-query \"CREATE TABLE t AS SELECT 1\")
     (duckdb-query \"SELECT * FROM t\"))
   (duckdb-query-session-kill \"work\")"
@@ -1051,14 +1051,14 @@ Example:
          (error "Session %s does not exist" ,name-sym))
        ,@body)))
 
-(defmacro duckdb-with-transient-session (&rest body)
+(defmacro duckdb-query-with-transient-session (&rest body)
   "Execute BODY with temporary session, killed after completion.
 
 Creates anonymous session, executes BODY, kills session.
 Temp database is deleted automatically.
 
 Example:
-  (duckdb-with-transient-session
+  (duckdb-query-with-transient-session
     (duckdb-query \"CREATE TABLE t AS SELECT 1\")
     (duckdb-query \"SELECT * FROM t\"))"
   (declare (indent 0) (debug t))
@@ -1075,7 +1075,7 @@ Example:
 (defun duckdb-query--resolve-executor (explicit-executor)
   "Resolve executor from EXPLICIT-EXECUTOR or session context.
 
-Returns :session if inside `duckdb-with-session' scope,
+Returns :session if inside `duckdb-query-with-session' scope,
 otherwise returns EXPLICIT-EXECUTOR or :cli."
   (cond
    (explicit-executor explicit-executor)
@@ -1091,7 +1091,7 @@ ARGS supports:
   :name    - Session name (uses `duckdb-query--current-session' if nil)
   :timeout - Query timeout seconds
 
-Session must exist or be in scope via `duckdb-with-session'."
+Session must exist or be in scope via `duckdb-query-with-session'."
   (let ((session-name (or (plist-get args :name)
                           duckdb-query--current-session
                           (error "No session specified and not in session scope")))
@@ -1219,7 +1219,7 @@ Example:
   ;; Access as: INSERT INTO mydb.logs VALUES (...)
 
 Also see `duckdb-query-session-detach' to remove attachment.
-Also see `duckdb-with-database' for scoped attachment."
+Also see `duckdb-query-with-database' for scoped attachment."
   (let* ((session (or (gethash session-name duckdb-query-sessions)
                       (error "Session %s does not exist" session-name)))
          (proc (duckdb-session-process session))
@@ -1241,7 +1241,7 @@ Also see `duckdb-with-database' for scoped attachment."
   "Detach database ALIAS from session SESSION-NAME.
 
 ALIAS is the identifier used when attaching the database via
-`duckdb-query-session-attach' or `duckdb-with-database'.
+`duckdb-query-session-attach' or `duckdb-query-with-database'.
 
 Signals error if session does not exist or ALIAS is not attached.
 
@@ -1256,7 +1256,7 @@ Example:
   ;; sales.* no longer accessible
 
 Also see `duckdb-query-session-attach' for attaching databases.
-Also see `duckdb-with-database' for automatic attach/detach."
+Also see `duckdb-query-with-database' for automatic attach/detach."
   (duckdb-query-session-execute
    session-name
    (format "DETACH %s" alias)
