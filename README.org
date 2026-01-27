@@ -476,10 +476,12 @@ Other benchmark functions: ~duckdb-query-bench-formats~ (compare output formats)
 - [[#output-formats][Output Formats]]
 - [[#schema-introspection][Schema Introspection]]
 - [[#database-persistence][Database Persistence]]
+- [[#new-session-based-execution][(NEW) Session-Based Execution]]
 - [[#nested-types][Nested Types]]
 - [[#performance][Performance]]
 - [[#acknowledgements][Acknowledgements]]
 - [[#related-packages][Related Packages]]
+- [[#integration][Integration]]
 :END:
 
 * Querying Elisp Data
@@ -717,6 +719,9 @@ These macros work with CLI execution. For persistent processes with lower
 latency, see "Session-Based Execution" below.
 
 * (NEW) Session-Based Execution
+:PROPERTIES:
+:CUSTOM_ID: new-session-based-execution
+:END:
 
 For repeated queries or workflows requiring persistent state, sessions eliminate
 DuckDB process spawn overhead (~10-20ms per query). A session maintains a
@@ -924,6 +929,9 @@ Other benchmark functions: ~duckdb-query-bench-formats~ (compare output formats)
   this will allow org-table reference in duckdb-sql source blocks and new output
   types.
 * Integration
+:PROPERTIES:
+:CUSTOM_ID: integration
+:END:
 
 #+begin_quote
 [!WARNING]
