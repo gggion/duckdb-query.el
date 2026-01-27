@@ -49,6 +49,12 @@ ten-row org table and a runtime Elisp variable, returning the result as an
 alist you can immediately process.
 
 * COMMENT README
+# ================
+
+=This commented out treee is for usage inside of emacs=
+=without all the html getting in the way=
+
+# ================
 
 #+begin_src elisp :results code
 (let ((carriers '(((code . "UA") (name . "United Airlines"))
@@ -219,7 +225,7 @@ Join an org table with Elisp data:
 #+end_src
 
 Join a remote Parquet file with local Elisp configuration:
-#+begin_src elisp :results code 
+#+begin_src elisp :results code
  (let ((airports '(((code . "JFK")
                    (name . "JFK International"))
                   ((code . "LGA")
@@ -321,7 +327,7 @@ nested Elisp structures:
 (((point (x . 1) (y . 2))))
 #+end_src
 
-#+begin_src elisp :results code 
+#+begin_src elisp :results code
 ;; Nested data survives roundtrips
 (let ((data
        '(((id . 1) (loc (x . 10) (y . 20)))
@@ -353,7 +359,7 @@ automatically use streaming since they cannot be wrapped in file output.
 
 Profile your specific queries with the benchmark module:
 
-#+begin_src elisp 
+#+begin_src elisp
 (duckdb-query-bench-output-strategies
  "SELECT * FROM range(10000) t(i)"
  :iterations 3)
@@ -385,7 +391,7 @@ Other benchmark functions: ~duckdb-query-bench-formats~ (compare output formats)
   this will allow org-table reference in duckdb-sql source blocks and new output
   types.
 
-  
+
 * Quick Examples
 #+begin_html
 <table align="center"><tr>
@@ -412,7 +418,7 @@ Other benchmark functions: ~duckdb-query-bench-formats~ (compare output formats)
  :format :org-table)</pre>
 </td><td>
 <pre>
-,  rendered       data 
+,  rendered       data
 ,| n | letter | ((n letter)
 ,|---|--------|  (1 "a") (2 "a")
 ,| 1 | a      |  (3 "a") (1 "b")
@@ -549,7 +555,7 @@ buffer:
     <th width="500px">Table</th>
 <tr><td align="center">
 <pre>
-,#+NAME: inventory                  
+,#+NAME: inventory
 ,| sku   | product | stock | price |
 ,|-------+---------+-------+-------|
 ,| A-100 | Widget  |    50 |  9.99 |
@@ -572,7 +578,7 @@ buffer:
  :format :org-table)</pre>
 </td><td>
 <pre>
-,| product |   value | ((product value)     
+,| product |   value | ((product value)
 ,|---------+---------|  ("Gizmo" 1124.25)
 ,| Gizmo   | 1124.25 |  ("Gadget" 749.7)
 ,| Gadget  |   749.7 |  ("Widget" 499.5))
@@ -617,7 +623,7 @@ Join an org table with Elisp data:
 #+end_html
 
 Join a remote Parquet file with local Elisp data:
-#+begin_src elisp :results code 
+#+begin_src elisp :results code
  (let ((airports '(((code . "JFK")
                    (name . "JFK International"))
                   ((code . "LGA")
@@ -699,14 +705,126 @@ For workflows requiring state across queries, bind a database file:
 </td></tr></table>
 #+end_html
 
-~duckdb-with-transient-database~ creates a temporary file deleted after the
-block. Use ~duckdb-with-database~ for persistent files:
+~duckdb-query-with-transient-database~ creates a temporary file deleted after the
+block. Use ~duckdb-query-with-database~ for persistent files:
 
 #+begin_src elisp
-(duckdb-with-database "analytics.db"
+(duckdb-query-with-database "analytics.db"
   (duckdb-query "SELECT COUNT(*) FROM events"))
 #+end_src
 
+These macros work with CLI execution. For persistent processes with lower
+latency, see "Session-Based Execution" below.
+
+* (NEW) Session-Based Execution
+
+For repeated queries or workflows requiring persistent state, sessions eliminate
+DuckDB process spawn overhead (~10-20ms per query). A session maintains a
+long-running DuckDB process with its own temporary database:
+
+#+begin_src elisp :results code
+;; first we initialize the sessions
+(duckdb-query-session-start "work")
+(duckdb-query-session-start "other-session")
+
+(let ((result-set
+       (list :work-results
+             ;;we can now connect to the "work" session and execute queries iside of it
+             (duckdb-query-with-session "work"
+               (duckdb-query "CREATE TABLE events AS SELECT i, random() AS value FROM range(1000) t(i)")
+               (duckdb-query "SELECT AVG(value) as average FROM events"))
+             :other-results
+             ;;then we can execute queries on the "other-session"
+             (duckdb-query-with-session "other-session"
+               (duckdb-query "CREATE TABLE logs AS SELECT i, random() AS value FROM range(10) t(i)")
+               (duckdb-query "SELECT AVG(value) as average FROM logs"))
+             :back-to-work
+             ;;since we haven't killed "work" session process, we can go back and execute on it again
+             (duckdb-query-with-session "work"
+               (duckdb-query "CREATE TABLE new_table AS SELECT i, random() AS value FROM range(100) t(i)")
+               (duckdb-query "SELECT AVG(value) as average FROM new_table")))))
+
+  ;; when we're done we delete the sessions
+  (duckdb-query-session-kill "work")
+  (duckdb-query-session-kill "other-session")
+  result-set)
+#+end_src
+
+#+begin_src elisp
+(:work-results (((average . 0.4798298225990715)))
+ :other-results (((average . 0.49212970609599005)))
+ :back-to-work (((average . 0.4934245134851129))))
+#+end_src
+
+For temporary sessions that clean up automatically:
+
+#+begin_src elisp :results code
+(duckdb-query-with-transient-session
+  (duckdb-query "CREATE TABLE scratch AS SELECT random() as val FROM range(5)")
+  (duckdb-query "SELECT AVG(val) as mean FROM scratch"))
+;; => (((mean . 0.33628298988435995)))
+#+end_src
+
+Sessions provide 7-10x speedup for simple queries:
+
+| Executor | Simple Query | 10k Rows |
+|----------+--------------+----------|
+| :cli     | ~22ms        | ~93ms    |
+| :session | ~2ms         | ~20ms    |
+
+** Attaching External Databases
+
+Attach external database files to a session for cross-database queries:
+
+#+begin_src elisp :results code
+(duckdb-query-session-start "analysis")
+(unwind-protect
+    (duckdb-query-with-session "analysis"
+      ;; Attach returns the alias (derived from filename)
+      (let ((alias (duckdb-query-session-attach "analysis" "/data/sales.db")))
+        (duckdb-query
+         (format "SELECT * FROM %s.orders LIMIT 5" alias))))
+  (duckdb-query-session-kill "analysis"))
+#+end_src
+
+Use ~duckdb-query-with-database~ for scoped attachment with automatic cleanup:
+
+#+begin_src elisp :results code
+(duckdb-query-session-start "work")
+(unwind-protect
+    (duckdb-query-with-session "work"
+      (duckdb-query "CREATE TABLE local_data AS SELECT 1 as id")
+      (duckdb-query-with-database "/data/reference.db"
+        ;; reference.db attached as "reference" within this scope
+        (duckdb-query
+         "SELECT l.id, r.name
+          FROM local_data l
+          JOIN reference.lookup r ON l.id = r.id"))
+      ;; reference.db automatically detached here
+      (duckdb-query "SELECT * FROM local_data"))
+  (duckdb-query-session-kill "work"))
+#+end_src
+
+** Session Management
+
+List active sessions:
+#+begin_src elisp
+(duckdb-query-session-list)
+;; => (#s(duckdb-session :name "analytics" :status active :query-count 42 ...))
+#+end_src
+
+Interactive commands:
+- ~M-x duckdb-query-session-display-status~ - Show all sessions with statistics
+- ~M-x duckdb-query-session-kill-interactive~ - Kill session with completion
+- ~M-x duckdb-query-session-kill-all~ - Kill all sessions
+
+Session initialization commands run when sessions start:
+#+begin_src elisp
+(setq duckdb-query-session-init-commands
+      '("SET memory_limit = '4GB'"
+        "INSTALL spatial"
+        "LOAD spatial"))
+#+end_src
 * Nested Types
 :PROPERTIES:
 :CUSTOM_ID: nested-types
@@ -794,7 +912,7 @@ Other benchmark functions: ~duckdb-query-bench-formats~ (compare output formats)
   directly, and the ~with-transient-connection~ / ~with-default-connection~
   macros for database context management all informed the design of
   duckdb-query's ~:data~ parameter, ~@org:~ references, and
-  ~duckdb-with-transient-database~ / ~duckdb-with-database~ forms.
+  ~duckdb-query-with-transient-database~ / ~duckdb-query-with-database~ forms.
 
 * Related Packages
 :PROPERTIES:
@@ -805,3 +923,98 @@ Other benchmark functions: ~duckdb-query-bench-formats~ (compare output formats)
   of the functionalities here to it via a specialized ob-duckdb-query executor,
   this will allow org-table reference in duckdb-sql source blocks and new output
   types.
+* Integration
+
+#+begin_quote
+[!WARNING]
+UNDER CONSTRUCTION
+#+end_quote
+
+As mentioned before, sessions allow low-latency, fast response times, going as
+low as 2ms on frequent, repeating small queries like batched updates/inserts and
+single row extraction. Add to this persistent session processes that can
+communicate between each other via database ~ATTACH~/~DETACH~ or external file
+output/input, and we have the *foundation for database-backed major modes, worker
+pools, and orchestrated data pipelines within Emacs.*
+
+
+** Buffer-Local Sessions
+
+The ~duckdb-query-session-setup-buffer~ helper attaches a session to the current
+buffer. It creates the session if needed, registers the buffer as an owner, and
+sets up the buffer-local binding so all ~duckdb-query~ calls within that buffer
+automatically route to the session. The session persists while any owning buffer
+exists and is killed when the last owner closes:
+
+#+begin_src elisp
+(add-hook 'my-data-mode-hook
+          (lambda ()
+            (duckdb-query-session-setup-buffer "my-data-session")))
+;; All my-data-mode buffers share one session
+;; Session killed when last my-data-mode buffer closes
+#+end_src
+
+This pattern enables major modes that maintain persistent analytical state. A
+dashboard mode might cache expensive aggregations in session tables and refresh
+instantly on demand:
+
+#+begin_src elisp
+(define-derived-mode my-dashboard-mode special-mode "Dashboard"
+  (duckdb-query-session-setup-buffer "dashboard")
+  (setq-local revert-buffer-function #'my-dashboard-refresh))
+
+(defun my-dashboard-refresh (&rest _)
+  "Refresh dashboard from session's cached aggregations."
+  (let ((data (duckdb-query "SELECT * FROM cached_metrics")))
+    (my-dashboard-render data)))
+#+end_src
+
+** Lifecycle Hooks
+
+Three hooks provide visibility into session activity, enabling logging, metrics
+collection, and cross-session coordination:
+
+#+begin_src elisp
+;; Log all queries with timing
+(add-hook 'duckdb-query-session-query-executed-functions
+          (lambda (name query duration-ms)
+            (message "[%s] %.1fms: %s"
+                     name duration-ms
+                     (truncate-string-to-width query 60))))
+
+;; Track session lifecycle
+(add-hook 'duckdb-query-session-created-functions
+          (lambda (name _session)
+            (message "Session started: %s" name)))
+
+(add-hook 'duckdb-query-session-killed-functions
+          (lambda (name)
+            (message "Session ended: %s" name)))
+#+end_src
+
+These hooks will be essential for building a coordinator layer that manages
+worker sessions, tracks query performance across the system, and handles
+failover when sessions die unexpectedly.
+
+** Future Directions
+
+This infrastructure opens up architectural patterns that go beyond single-query
+workflows. The ultimate goal is to enable the creation of data-centric emacs
+packages and tools, such as:
+
+- quickly retrieving tabular data from most filetypes or complex queries
+- perform tens to hundreds of CRUD operations per second
+- manage and orchestrate data processing jobs across multiple workers from a central coordinator
+- leverage [[https://github.com/cwida/duckpgq-extension][graph queries]], [[https://github.com/duckdb/duckdb-spatial][geo-spatial processing]], [[https://github.com/duckdb/duckdb-vss][vector similarity search]] and other techniques inside Emacs
+
+Some directions still in design:
+
+- *Database-backed buffers*: Major modes where buffer content is backed by
+  session tables, enabling SQL-powered search, filter, and transform operations
+  that would be impractical with pure Elisp
+- *Worker pools*: Multiple sessions processing jobs in parallel, coordinated
+  through a shared database via ~ATTACH~ or message-passing through elisp.
+- *Live dashboards*: Buffers that subscribe to query results and refresh
+  automatically when underlying data changes
+
+I'll update this section as these experiments mature into usable packages.
