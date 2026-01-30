@@ -391,6 +391,104 @@ Other benchmark functions: ~duckdb-query-bench-formats~ (compare output formats)
   this will allow org-table reference in duckdb-sql source blocks and new output
   types.
 
+** Integration
+:PROPERTIES:
+:CUSTOM_ID: integration
+:END:
+
+#+begin_quote
+[!WARNING]
+UNDER CONSTRUCTION
+#+end_quote
+
+As mentioned before, sessions allow low-latency, fast response times, going as
+low as 2ms on frequent, repeating small queries like batched updates/inserts and
+single row extraction. Add to this persistent session processes that can
+communicate between each other via database ~ATTACH~/~DETACH~ or external file
+output/input, and we have the *foundation for database-backed major modes, worker
+pools, and orchestrated data pipelines within Emacs.*
+
+
+*** Buffer-Local Sessions
+
+The ~duckdb-query-session-setup-buffer~ helper attaches a session to the current
+buffer. It creates the session if needed, registers the buffer as an owner, and
+sets up the buffer-local binding so all ~duckdb-query~ calls within that buffer
+automatically route to the session. The session persists while any owning buffer
+exists and is killed when the last owner closes:
+
+#+begin_src elisp
+(add-hook 'my-data-mode-hook
+          (lambda ()
+            (duckdb-query-session-setup-buffer "my-data-session")))
+;; All my-data-mode buffers share one session
+;; Session killed when last my-data-mode buffer closes
+#+end_src
+
+This pattern enables major modes that maintain persistent analytical state. A
+dashboard mode might cache expensive aggregations in session tables and refresh
+instantly on demand:
+
+#+begin_src elisp
+(define-derived-mode my-dashboard-mode special-mode "Dashboard"
+  (duckdb-query-session-setup-buffer "dashboard")
+  (setq-local revert-buffer-function #'my-dashboard-refresh))
+
+(defun my-dashboard-refresh (&rest _)
+  "Refresh dashboard from session's cached aggregations."
+  (let ((data (duckdb-query "SELECT * FROM cached_metrics")))
+    (my-dashboard-render data)))
+#+end_src
+
+*** Lifecycle Hooks
+
+Three hooks provide visibility into session activity, enabling logging, metrics
+collection, and cross-session coordination:
+
+#+begin_src elisp
+;; Log all queries with timing
+(add-hook 'duckdb-query-session-query-executed-functions
+          (lambda (name query duration-ms)
+            (message "[%s] %.1fms: %s"
+                     name duration-ms
+                     (truncate-string-to-width query 60))))
+
+;; Track session lifecycle
+(add-hook 'duckdb-query-session-created-functions
+          (lambda (name _session)
+            (message "Session started: %s" name)))
+
+(add-hook 'duckdb-query-session-killed-functions
+          (lambda (name)
+            (message "Session ended: %s" name)))
+#+end_src
+
+These hooks will be essential for building a coordinator layer that manages
+worker sessions, tracks query performance across the system, and handles
+failover when sessions die unexpectedly.
+
+*** Future Directions
+
+This infrastructure opens up architectural patterns that go beyond single-query
+workflows. The ultimate goal is to enable the creation of data-centric emacs
+packages and tools, such as:
+
+- quickly retrieving tabular data from most filetypes or complex queries
+- perform tens to hundreds of CRUD operations per second
+- manage and orchestrate data processing jobs across multiple workers from a central coordinator
+- leverage [[https://github.com/cwida/duckpgq-extension][graph queries]], [[https://github.com/duckdb/duckdb-spatial][geo-spatial processing]], [[https://github.com/duckdb/duckdb-vss][vector similarity search]] and other techniques inside Emacs
+
+Some directions still in design:
+
+- *Database-backed buffers*: Major modes where buffer content is backed by
+  session tables, enabling SQL-powered search, filter, and transform operations
+  that would be impractical with pure Elisp
+- *Worker pools*: Multiple sessions processing jobs in parallel, coordinated
+  through a shared database via ~ATTACH~ or message-passing through elisp.
+- *Live dashboards*: Buffers that subscribe to query results and refresh
+  automatically when underlying data changes
+
+I'll update this section as these experiments mature into usable packages.
 
 * Quick Examples
 #+begin_html
