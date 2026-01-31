@@ -336,9 +336,14 @@ Behavior depends on execution context:
 
 Within session scope (inside `duckdb-query-with-session'):
   ATTACHes DATABASE as read-only with alias derived from filename.
-  Executes BODY with database available via alias.
-  DETACHes database after BODY completes, even on error.
-  Tables accessed as ALIAS.table_name.
+  Executes USE to make attached database the default catalog.
+  Executes BODY with unqualified table names resolving to DATABASE.
+  Restores previous catalog context after BODY completes.
+  DETACHes database after restoration, even on error.
+
+  Tables in the attached database can be accessed with unqualified
+  names.  Tables in the session's temp database require qualification
+  with the session catalog name.
 
 Outside session scope:
   Binds `duckdb-query-default-database' to DATABASE for BODY.
@@ -361,22 +366,33 @@ Example within session:
 
   (duckdb-query-with-session \"work\"
     (duckdb-query-with-database \"/path/to/sales.db\"
-      ;; sales.db attached as \\='sales\\=' (filename without extension)
-      (duckdb-query \"SELECT * FROM sales.orders\")))
+      ;; sales.db attached and set as default catalog
+      ;; Unqualified names resolve to sales.db:
+      (duckdb-query \"SELECT * FROM orders\")
+      ;; Session tables require qualification:
+      (duckdb-query \"SELECT * FROM duckdb_session_XXX.main.temp_results\")))
   ;; Database automatically detached after body
 
 Also see `duckdb-query-with-session' for session-scoped execution.
 Also see `duckdb-query-session-attach' for manual attachment."
   (declare (indent 1) (debug t))
   (let ((db-sym (make-symbol "database"))
-        (alias-sym (make-symbol "alias")))
+        (alias-sym (make-symbol "alias"))
+        (prev-context-sym (make-symbol "prev-context")))
     `(let ((,db-sym ,database))
        (if duckdb-query--current-session
-           (let ((,alias-sym (duckdb-query-session-attach
-                              duckdb-query--current-session
-                              ,db-sym)))
+           (let* ((,alias-sym (duckdb-query-session-attach
+                               duckdb-query--current-session
+                               ,db-sym))
+                  (,prev-context-sym
+                   (format "%s.%s"
+                           (duckdb-query-value "SELECT current_catalog()")
+                           (duckdb-query-value "SELECT current_schema()"))))
+             (duckdb-query (format "USE %s.main" ,alias-sym))
              (unwind-protect
                  (progn ,@body)
+               (ignore-errors
+                 (duckdb-query (format "USE %s" ,prev-context-sym)))
                (ignore-errors
                  (duckdb-query-session-detach
                   duckdb-query--current-session
@@ -400,9 +416,10 @@ Outside session scope:
 
 Within session scope (inside `duckdb-query-with-session'):
   ATTACH temp database to session with auto-generated alias.
-  Execute BODY with database available via alias.
-  DETACH and delete temp file after BODY completes.
-  Access tables as _temp_N.table_name (alias shown in return).
+  Execute USE to make temp database the default catalog.
+  Execute BODY with unqualified names resolving to temp database.
+  Restore previous catalog context after BODY completes.
+  DETACH and delete temp file after restoration.
 
 Return value of last form in BODY.
 
@@ -420,7 +437,7 @@ Example within session:
 
   (duckdb-query-with-session \"work\"
     (duckdb-query-with-transient-database
-      ;; Temp database attached, tables accessible
+      ;; Temp database attached and set as default
       (duckdb-query \"CREATE TABLE scratch AS SELECT 1 as val\")
       (duckdb-query \"SELECT * FROM scratch\")))
   ;; Temp database automatically detached and deleted
@@ -433,20 +450,28 @@ Also see `duckdb-query-with-database' for named database files.
 Also see `duckdb-query-with-transient-session' for ephemeral sessions."
   (declare (indent 0) (debug t))
   (let ((db-var (make-symbol "transient-db"))
-        (alias-var (make-symbol "transient-alias")))
+        (alias-var (make-symbol "transient-alias"))
+        (prev-context-var (make-symbol "prev-context")))
     `(let ((,db-var (expand-file-name
-                     (concat (make-temp-name "duckdb-transient-")
+                     (concat (make-temp-name "duckdb_transient_")
                              ".duckdb")
                      temporary-file-directory)))
        (if duckdb-query--current-session
-           ;; Session context: ATTACH/DETACH
-           (let ((,alias-var (duckdb-query-session-attach
-                              duckdb-query--current-session
-                              ,db-var
-                              nil    ; auto-generate alias
-                              nil))) ; writable
+           ;; Session context: ATTACH/USE/DETACH
+           (let* ((,alias-var (duckdb-query-session-attach
+                               duckdb-query--current-session
+                               ,db-var
+                               nil    ; auto-generate alias
+                               nil))  ; writable
+                  (,prev-context-var
+                   (format "%s.%s"
+                           (duckdb-query-value "SELECT current_catalog()")
+                           (duckdb-query-value "SELECT current_schema()"))))
+             (duckdb-query (format "USE %s.main" ,alias-var))
              (unwind-protect
                  (progn ,@body)
+               (ignore-errors
+                 (duckdb-query (format "USE %s" ,prev-context-var)))
                (ignore-errors
                  (duckdb-query-session-detach
                   duckdb-query--current-session
@@ -877,7 +902,7 @@ Signals error if session NAME already exists."
   (when (gethash name duckdb-query-sessions)
     (error "Session %s already exists" name))
   (let* ((temp-db (concat (make-temp-name
-                           (expand-file-name "duckdb-session-"
+                           (expand-file-name "duckdb_session_"
                                              temporary-file-directory))
                           ".duckdb"))
          (proc (start-process (format "duckdb-session-%s" name)
@@ -1249,8 +1274,8 @@ ALIAS is SQL identifier for the attached database.  When nil, defaults
 to filename without extension, sanitized for SQL (non-alphanumeric
 characters replaced with underscores).
 
-READONLY when non-nil (default t) opens database in read-only mode,
-preventing write conflicts.  Use nil for write access.
+READONLY when non-nil opens database in read-only mode, preventing
+write conflicts.  When nil (default), opens for read-write access.
 
 Returns alias string used for attachment.
 
@@ -1274,8 +1299,7 @@ Also see `duckdb-query-with-database' for scoped attachment."
                       (error "Session %s does not exist" session-name)))
          (proc (duckdb-session-process session))
          (raw-alias (or alias (file-name-base database)))
-         (alias (replace-regexp-in-string "[^a-zA-Z0-9_]" "_" raw-alias))
-         (readonly (if (memq readonly '(nil t)) (or readonly t) readonly)))
+         (alias (replace-regexp-in-string "[^a-zA-Z0-9_]" "_" raw-alias)))
     (unless (process-live-p proc)
       (error "Session %s process is dead" session-name))
     (duckdb-query-session-execute
