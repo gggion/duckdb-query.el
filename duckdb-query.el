@@ -327,17 +327,20 @@ Also see `duckdb-query-columns' for just column names."
 
 ;;;; Context Management Macro
 
-(defmacro duckdb-query-with-database (database &rest body)
-  "Execute BODY with DATABASE as context.
+(defmacro duckdb-query-with-database (spec &rest body)
+  "Execute BODY with database from SPEC as context.
 
-DATABASE is file path string, evaluated once.
+SPEC is a list where:
+  - First element is database path (evaluated, allows variables)
+  - Remaining elements are keyword options:
+    :readonly - When non-nil, open database read-only (default nil)
 
 Behavior depends on execution context:
 
 Within session scope (inside `duckdb-query-with-session'):
-  ATTACHes DATABASE as read-only with alias derived from filename.
+  ATTACHes database with specified readonly mode.
   Executes USE to make attached database the default catalog.
-  Executes BODY with unqualified table names resolving to DATABASE.
+  Executes BODY with unqualified table names resolving to database.
   Restores previous catalog context after BODY completes.
   DETACHes database after restoration, even on error.
 
@@ -346,44 +349,46 @@ Within session scope (inside `duckdb-query-with-session'):
   with the session catalog name.
 
 Outside session scope:
-  Binds `duckdb-query-default-database' to DATABASE for BODY.
-  All `duckdb-query' calls use DATABASE unless overridden by
+  Binds `duckdb-query-default-database' to database path for BODY.
+  All `duckdb-query' calls use database unless overridden by
   explicit :database parameter.
 
 Return value of last form in BODY.
 
 Example outside session:
 
-  (duckdb-query-with-database \"app.db\"
-    (duckdb-query \"CREATE TABLE users (id INTEGER, name TEXT)\"
-                  :readonly nil)
-    (duckdb-query \"INSERT INTO users VALUES (1, \\='Alice\\=')\"
-                  :readonly nil)
+  (duckdb-query-with-database \\='(\"app.db\")
     (duckdb-query \"SELECT * FROM users\"))
-  ;; => (((id . 1) (name . \"Alice\")))
+
+  ;; With variable:
+  (let ((db-path \"app.db\"))
+    (duckdb-query-with-database \\=`(,db-path :readonly t)
+      (duckdb-query \"SELECT * FROM users\")))
 
 Example within session:
 
   (duckdb-query-with-session \"work\"
-    (duckdb-query-with-database \"/path/to/sales.db\"
-      ;; sales.db attached and set as default catalog
-      ;; Unqualified names resolve to sales.db:
-      (duckdb-query \"SELECT * FROM orders\")
-      ;; Session tables require qualification:
-      (duckdb-query \"SELECT * FROM duckdb_session_XXX.main.temp_results\")))
-  ;; Database automatically detached after body
+    (duckdb-query-with-database \\='(\"/path/to/sales.db\" :readonly t)
+      ;; sales.db attached read-only and set as default catalog
+      (duckdb-query \"SELECT * FROM orders\")))
 
 Also see `duckdb-query-with-session' for session-scoped execution.
 Also see `duckdb-query-session-attach' for manual attachment."
   (declare (indent 1) (debug t))
-  (let ((db-sym (make-symbol "database"))
+  (let ((spec-sym (make-symbol "spec"))
+        (db-sym (make-symbol "database"))
+        (readonly-sym (make-symbol "readonly"))
         (alias-sym (make-symbol "alias"))
         (prev-context-sym (make-symbol "prev-context")))
-    `(let ((,db-sym ,database))
+    `(let* ((,spec-sym ,spec)
+            (,db-sym (car ,spec-sym))
+            (,readonly-sym (plist-get (cdr ,spec-sym) :readonly)))
        (if duckdb-query--current-session
            (let* ((,alias-sym (duckdb-query-session-attach
                                duckdb-query--current-session
-                               ,db-sym))
+                               ,db-sym
+                               nil  ; auto-generate alias
+                               ,readonly-sym))
                   (,prev-context-sym
                    (format "%s.%s"
                            (duckdb-query-value "SELECT current_catalog()")
@@ -415,7 +420,7 @@ Outside session scope:
   Queries default to writable mode to enable database creation.
 
 Within session scope (inside `duckdb-query-with-session'):
-  ATTACH temp database to session with auto-generated alias.
+  ATTACH temp database to session as writable.
   Execute USE to make temp database the default catalog.
   Execute BODY with unqualified names resolving to temp database.
   Restore previous catalog context after BODY completes.
@@ -437,14 +442,9 @@ Example within session:
 
   (duckdb-query-with-session \"work\"
     (duckdb-query-with-transient-database
-      ;; Temp database attached and set as default
       (duckdb-query \"CREATE TABLE scratch AS SELECT 1 as val\")
       (duckdb-query \"SELECT * FROM scratch\")))
   ;; Temp database automatically detached and deleted
-
-Note: For session-scoped temporary state that doesn't need file
-persistence, consider using the session's built-in temp database
-directly (tables created in session persist until session killed).
 
 Also see `duckdb-query-with-database' for named database files.
 Also see `duckdb-query-with-transient-session' for ephemeral sessions."
@@ -462,7 +462,7 @@ Also see `duckdb-query-with-transient-session' for ephemeral sessions."
                                duckdb-query--current-session
                                ,db-var
                                nil    ; auto-generate alias
-                               nil))  ; writable
+                               nil))  ; writable for transient
                   (,prev-context-var
                    (format "%s.%s"
                            (duckdb-query-value "SELECT current_catalog()")
