@@ -330,9 +330,10 @@ Also see `duckdb-query-columns' for just column names."
 (defmacro duckdb-query-with-database (spec &rest body)
   "Execute BODY with database from SPEC as context.
 
-SPEC is a list where:
-  - First element is database path (evaluated, allows variables)
-  - Remaining elements are keyword options:
+SPEC is either:
+  - A string database path
+  - A list where first element is database path (evaluated, allows variables)
+    and remaining elements are keyword options:
     :readonly - When non-nil, open database read-only (default nil)
 
 Behavior depends on execution context:
@@ -357,7 +358,11 @@ Return value of last form in BODY.
 
 Example outside session:
 
-  (duckdb-query-with-database \\='(\"app.db\")
+  (duckdb-query-with-database \"app.db\"
+    (duckdb-query \"SELECT * FROM users\"))
+
+  ;; With options:
+  (duckdb-query-with-database \\='(\"app.db\" :readonly t)
     (duckdb-query \"SELECT * FROM users\"))
 
   ;; With variable:
@@ -368,9 +373,13 @@ Example outside session:
 Example within session:
 
   (duckdb-query-with-session \"work\"
-    (duckdb-query-with-database \\='(\"/path/to/sales.db\" :readonly t)
-      ;; sales.db attached read-only and set as default catalog
-      (duckdb-query \"SELECT * FROM orders\")))
+    (duckdb-query-with-database \"/path/to/sales.db\"
+      ;; sales.db attached and set as default catalog
+      (duckdb-query \"SELECT * FROM orders\"))
+
+    (duckdb-query-with-database \\='(\"/path/to/logs.db\" :readonly t)
+      ;; logs.db attached read-only
+      (duckdb-query \"SELECT * FROM entries\")))
 
 Also see `duckdb-query-with-session' for session-scoped execution.
 Also see `duckdb-query-session-attach' for manual attachment."
@@ -381,8 +390,11 @@ Also see `duckdb-query-session-attach' for manual attachment."
         (alias-sym (make-symbol "alias"))
         (prev-context-sym (make-symbol "prev-context")))
     `(let* ((,spec-sym ,spec)
-            (,db-sym (car ,spec-sym))
-            (,readonly-sym (plist-get (cdr ,spec-sym) :readonly)))
+            (,db-sym (if (stringp ,spec-sym)
+                         ,spec-sym
+                       (car ,spec-sym)))
+            (,readonly-sym (and (listp ,spec-sym)
+                                (plist-get (cdr ,spec-sym) :readonly))))
        (if duckdb-query--current-session
            (let* ((,alias-sym (duckdb-query-session-attach
                                duckdb-query--current-session
