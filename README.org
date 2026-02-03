@@ -80,7 +80,7 @@ alist you can immediately process.
      ((flights . 32729) (avg_delay . 0.4))]))
 #+end_src
 
-** COMMENT  Quick Examples
+** COMMENT Quick Examples
 
 #+begin_src elisp :results code
 (duckdb-query
@@ -135,7 +135,7 @@ alist you can immediately process.
 ((n . [0 1 2 3 4]))
 #+end_src
 
-** COMMENT  Querying Elisp Data
+** COMMENT Querying Elisp Data
 
 Pass Elisp alists to queries via the ~:data~ parameter. The data becomes a table
 named ~@data~:
@@ -207,7 +207,7 @@ buffer:
 
 Reference tables in other files with ~@org:path/to/file.org:table-name~.
 
-** COMMENT  Combining Sources
+** COMMENT Combining Sources
 
 Join an org table with Elisp data:
 #+begin_src elisp :results code
@@ -250,7 +250,7 @@ Join a remote Parquet file with local Elisp configuration:
  ((name . "LaGuardia") (departures . 104662) (avg_delay . 10.3)))
 #+end_src
 
-** COMMENT  Output Formats
+** COMMENT Output Formats
 
 The ~:format~ parameter controls result structure:
 
@@ -264,7 +264,7 @@ The ~:format~ parameter controls result structure:
 | ~:org-table~ | List of lists with header | Display, org-mode integration |
 | ~:raw~       | JSON string               | Custom parsing                |
 
-** COMMENT  Schema Introspection
+** COMMENT Schema Introspection
 Discover structure before querying:
 
 #+begin_src elisp :results code :exports both
@@ -281,36 +281,32 @@ Discover structure before querying:
 ;;     "air_time" "distance" "hour" "minute" "time_hour")
 #+end_src
 
-** COMMENT  Database Persistence
-For workflows requiring state across queries, bind a database file:
+** COMMENT Database Persistence
 
 #+begin_src elisp :results code
-(duckdb-with-transient-database
+(duckdb-query-with-transient-database
   (duckdb-query
-   "CREATE TABLE events (id INT, name TEXT)"
-   :readonly nil)
+   "CREATE TABLE events (id INT, name TEXT)")
   (duckdb-query
    "INSERT INTO events VALUES
-    (1, 'click'), (2, 'scroll')"
-   :readonly nil)
+    (1, 'click'), (2, 'scroll')")
   (duckdb-query "SELECT * FROM events"))
 #+end_src
 
-#+RESULTS:
+#+results:
 #+begin_src elisp
 (((id . 1) (name . "click")) ((id . 2) (name . "scroll")))
 #+end_src
 
 
-~duckdb-with-transient-database~ creates a temporary file deleted after the
-block. Use ~duckdb-with-database~ for persistent files:
+~duckdb-query-with-transient-database~ creates a temporary file deleted after the
+block. Use ~duckdb-query-with-database~ for persistent files:
 
 #+begin_src elisp :results code
-(duckdb-with-database "analytics.duckdb"
+(duckdb-query-with-database '("analytics.duckdb")
   (duckdb-query "SELECT COUNT(*) FROM events"))
 #+end_src
-
-** COMMENT  Nested Types
+** COMMENT Nested Types
 
 DuckDB supports STRUCT, LIST, MAP, and ARRAY types. These serialize correctly as
 nested Elisp structures:
@@ -343,7 +339,7 @@ nested Elisp structures:
 (((id . 1) (sum . 30)) ((id . 2) (sum . 70)))
 #+end_src
 
-** COMMENT  Performance
+** COMMENT Performance
 
 The package writes results to temporary files by default, providing 3-5x speedup
 on large results compared to streaming through stdout:
@@ -375,7 +371,7 @@ Other benchmark functions: ~duckdb-query-bench-formats~ (compare output formats)
 ~duckdb-query-bench-nested-types~ (compare nested type handling),
 ~duckdb-query-bench-data-formats~ (compare ~:data~ serialization).
 
-** COMMENT  Acknowledgements
+** COMMENT Acknowledgements
 
 - [[https://github.com/ak-coram/cl-duckdb][cl-duckdb]] by Ákos Kiss: The Common Lisp DuckDB wrapper that inspired this
   package's design philosophy. The approach of treating query results as native
@@ -385,7 +381,7 @@ Other benchmark functions: ~duckdb-query-bench-formats~ (compare output formats)
   duckdb-query's ~:data~ parameter, ~@org:~ references, and
   ~duckdb-with-transient-database~ / ~duckdb-with-database~ forms.
 
-** COMMENT  Related Packages
+** COMMENT Related Packages
 - [[https://github.com/jhinch/ob-duckdb][ob-duckdb]]: Org Babel integration for DuckDB source blocks. SOON I'll add most
   of the functionalities here to it via a specialized ob-duckdb-query executor,
   this will allow org-table reference in duckdb-sql source blocks and new output
@@ -780,9 +776,13 @@ Discover structure before querying:
 #+end_src
 
 * Database Persistence
-:PROPERTIES:
-:CUSTOM_ID: database-persistence
-:END:
+#+begin_quote
+[!TIP]
+*New in 0.7.0*: ~duckdb-query-with-database~ accepts an optional spec list for
+additional options.  Both =(duckdb-query-with-database "path" ...)= and
+=(duckdb-query-with-database '("path" :readonly t) ...)= are supported.
+#+end_quote
+
 For workflows requiring state across queries, bind a database file:
 
 #+begin_html
@@ -790,14 +790,12 @@ For workflows requiring state across queries, bind a database file:
     <th width="500px">Code</th>
     <th width="500px">Result</th></tr>
 <tr><td>
-<pre lang="elisp">(duckdb-with-transient-database
+<pre lang="elisp">(duckdb-query-with-transient-database
   (duckdb-query
-   "CREATE TABLE events (id INT, name TEXT)"
-   :readonly nil)
+   "CREATE TABLE events (id INT, name TEXT)")
   (duckdb-query
    "INSERT INTO events VALUES
-    (1, 'click'), (2, 'scroll')"
-   :readonly nil)
+    (1, 'click'), (2, 'scroll')")
   (duckdb-query "SELECT * FROM events"))</pre>
 </td><td>
 <pre lang="elisp">(((id . 1) (name . "click"))
@@ -809,54 +807,54 @@ For workflows requiring state across queries, bind a database file:
 block. Use ~duckdb-query-with-database~ for persistent files:
 
 #+begin_src elisp
-(duckdb-query-with-database "analytics.db"
+(duckdb-query-with-database '("analytics.duckdb")
   (duckdb-query "SELECT COUNT(*) FROM events"))
+#+end_src
+
+The spec list accepts keyword options:
+
+#+begin_src elisp
+;; Open read-only to prevent write conflicts
+(duckdb-query-with-database '("/shared/data.db" :readonly t)
+  (duckdb-query "SELECT * FROM reports"))
+
+;; With variable path
+(let ((db-path "~/project/app.db"))
+  (duckdb-query-with-database `(,db-path)
+    (duckdb-query "SELECT * FROM users")))
 #+end_src
 
 These macros work with CLI execution. For persistent processes with lower
 latency, see "Session-Based Execution" below.
-
-* (NEW) Session-Based Execution
-:PROPERTIES:
-:CUSTOM_ID: new-session-based-execution
-:END:
-
+* Session-Based Execution
 For repeated queries or workflows requiring persistent state, sessions eliminate
 DuckDB process spawn overhead (~10-20ms per query). A session maintains a
 long-running DuckDB process with its own temporary database:
 
 #+begin_src elisp :results code
-;; first we initialize the sessions
+;; Initialize sessions
 (duckdb-query-session-start "work")
 (duckdb-query-session-start "other-session")
 
 (let ((result-set
        (list :work-results
-             ;;we can now connect to the "work" session and execute queries iside of it
              (duckdb-query-with-session "work"
                (duckdb-query "CREATE TABLE events AS SELECT i, random() AS value FROM range(1000) t(i)")
                (duckdb-query "SELECT AVG(value) as average FROM events"))
              :other-results
-             ;;then we can execute queries on the "other-session"
              (duckdb-query-with-session "other-session"
                (duckdb-query "CREATE TABLE logs AS SELECT i, random() AS value FROM range(10) t(i)")
                (duckdb-query "SELECT AVG(value) as average FROM logs"))
              :back-to-work
-             ;;since we haven't killed "work" session process, we can go back and execute on it again
+             ;; Session state persists across scopes
              (duckdb-query-with-session "work"
                (duckdb-query "CREATE TABLE new_table AS SELECT i, random() AS value FROM range(100) t(i)")
                (duckdb-query "SELECT AVG(value) as average FROM new_table")))))
 
-  ;; when we're done we delete the sessions
+  ;; Clean up when done
   (duckdb-query-session-kill "work")
   (duckdb-query-session-kill "other-session")
   result-set)
-#+end_src
-
-#+begin_src elisp
-(:work-results (((average . 0.4798298225990715)))
- :other-results (((average . 0.49212970609599005)))
- :back-to-work (((average . 0.4934245134851129))))
 #+end_src
 
 For temporary sessions that clean up automatically:
@@ -877,35 +875,59 @@ Sessions provide 7-10x speedup for simple queries:
 
 ** Attaching External Databases
 
-Attach external database files to a session for cross-database queries:
+Attach external database files to a session for cross-database queries.
+~duckdb-query-with-database~ works seamlessly inside session scope:
 
 #+begin_src elisp :results code
 (duckdb-query-session-start "analysis")
 (unwind-protect
     (duckdb-query-with-session "analysis"
-      ;; Attach returns the alias (derived from filename)
-      (let ((alias (duckdb-query-session-attach "analysis" "/data/sales.db")))
-        (duckdb-query
-         (format "SELECT * FROM %s.orders LIMIT 5" alias))))
+      ;; Create local session table
+      (duckdb-query "CREATE TABLE local_summary AS SELECT 'session' as src")
+
+      ;; Attach external database - automatically becomes default catalog
+      (duckdb-query-with-database '("/data/sales.db" :readonly t)
+        ;; Unqualified names resolve to attached database
+        (duckdb-query "SELECT * FROM orders LIMIT 5")))
   (duckdb-query-session-kill "analysis"))
 #+end_src
 
-Use ~duckdb-query-with-database~ for scoped attachment with automatic cleanup:
+The macro handles catalog context automatically:
+- ATTACHes the database with specified readonly mode
+- Executes ~USE alias.main~ to make it the default catalog
+- Restores previous catalog context after the block
+- DETACHes the database on exit
+
+For manual control, use ~duckdb-query-session-attach~ and ~duckdb-query-session-detach~:
 
 #+begin_src elisp :results code
 (duckdb-query-session-start "work")
 (unwind-protect
     (duckdb-query-with-session "work"
-      (duckdb-query "CREATE TABLE local_data AS SELECT 1 as id")
-      (duckdb-query-with-database "/data/reference.db"
-        ;; reference.db attached as "reference" within this scope
-        (duckdb-query
-         "SELECT l.id, r.name
-          FROM local_data l
-          JOIN reference.lookup r ON l.id = r.id"))
-      ;; reference.db automatically detached here
-      (duckdb-query "SELECT * FROM local_data"))
+      (let ((alias (duckdb-query-session-attach "work" "/data/sales.db" nil t)))
+        ;; Access with qualified names: alias.table_name
+        (duckdb-query (format "SELECT COUNT(*) FROM %s.orders" alias))
+        (duckdb-query-session-detach "work" alias)))
   (duckdb-query-session-kill "work"))
+#+end_src
+
+** Transient Databases in Session Scope
+
+~duckdb-query-with-transient-database~ also adapts to session context:
+
+#+begin_src elisp :results code
+(duckdb-query-with-session "work"
+  (duckdb-query "CREATE TABLE permanent AS SELECT 'stays' as val")
+
+  (duckdb-query-with-transient-database
+    ;; Temp database attached and set as default catalog
+    (duckdb-query "CREATE TABLE scratch AS SELECT 'gone' as val")
+    (duckdb-query-value "SELECT val FROM scratch"))
+  ;; => "gone"
+
+  ;; Back to session context, scratch is gone
+  (duckdb-query-value "SELECT val FROM permanent"))
+;; => "stays"
 #+end_src
 
 ** Session Management
