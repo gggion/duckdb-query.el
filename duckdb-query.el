@@ -126,6 +126,53 @@ file creation.  Without this, the CLI executor defaults to read-only
 mode when a database path is specified, which fails for non-existent
 databases.")
 
+;;;; Internal Extraction Functions
+(defun duckdb-query--extract-single (rows format-name)
+  "Extract single scalar from ROWS, validating cardinality.
+
+ROWS is list of alists from JSON parsing.
+FORMAT-NAME is string for error messages (e.g., \":single format\")
+or nil for no suffix.
+
+Returns scalar value, or nil for empty results.
+Signals `user-error' if multiple rows or columns."
+  (let ((row (car rows)))
+    (cond
+     ((null rows) nil)
+     ((cdr rows)
+      (user-error "Query returned %d rows, expected 1%s"
+                  (length rows)
+                  (if format-name (format " for %s" format-name) "")))
+     ((cdr row)
+      (user-error "Query returned %d columns, expected 1%s"
+                  (length row)
+                  (if format-name (format " for %s" format-name) "")))
+     (t (cdar row)))))
+
+(defun duckdb-query--extract-row (rows format-name)
+  "Extract single row from ROWS, validating cardinality.
+
+ROWS is list of alists from JSON parsing.
+FORMAT-NAME is string for error messages or nil for no suffix.
+
+Returns row as alist, or nil for empty results.
+Signals `user-error' if multiple rows."
+  (cond
+   ((null rows) nil)
+   ((cdr rows)
+    (user-error "Query returned %d rows, expected 1%s"
+                (length rows)
+                (if format-name (format " for %s" format-name) "")))
+   (t (car rows))))
+
+(defun duckdb-query--extract-column (rows)
+  "Extract first column from ROWS as list.
+
+ROWS is list of alists from JSON parsing.
+
+Returns list of first column values, or nil for empty results."
+  (mapcar #'cdar rows))
+
 ;;;; Data Extraction Utilities
 
 (defun duckdb-query-value (query &rest args)
@@ -147,20 +194,38 @@ Example:
                       :database \"sales.db\")
   ;; => 99.95
 
-Also see `duckdb-query-column' for extracting entire columns."
-  (let* ((result (apply #'duckdb-query query :format :alist args))
-         (row (car result)))
-    (cond
-     ((null result)
-      nil)
-     ((cdr result)
-      (user-error "Query returned %d rows, expected 1"
-                  (length result)))
-     ((cdr row)
-      (user-error "Query returned %d columns, expected 1"
-                  (length row)))
-     (t
-      (cdar row)))))
+Also see `duckdb-query-column' for extracting entire columns.
+Also see `duckdb-query-row' for extracting single rows.
+Also see `duckdb-query' with :format :single for inline usage."
+  (duckdb-query--extract-single
+   (apply #'duckdb-query query :format :alist args)
+   nil))
+
+(defun duckdb-query-row (query &rest args)
+  "Return single row from QUERY as alist.
+
+QUERY is SQL string that must return exactly one row.
+ARGS are passed to `duckdb-query'.
+
+Returns the row as alist, or nil for empty results.
+
+Signals `user-error' if result has multiple rows.
+
+Example:
+
+  (duckdb-query-row \"SELECT * FROM users WHERE id = 1\")
+  ;; => ((id . 1) (name . \"Alice\") (email . \"alice@example.com\"))
+
+  (duckdb-query-row \"SELECT name, email FROM users WHERE id = @var:uid\"
+                    :var \\='((uid . 42)))
+  ;; => ((name . \"Bob\") (email . \"bob@example.com\"))
+
+Also see `duckdb-query-value' for scalar extraction.
+Also see `duckdb-query-column' for column extraction.
+Also see `duckdb-query' with :format :row for inline usage."
+  (duckdb-query--extract-row
+   (apply #'duckdb-query query :format :alist args)
+   nil))
 
 (defun duckdb-query-column (query &rest args)
   "Return single column from QUERY as list.
@@ -189,6 +254,8 @@ Example:
   ;; => [1 2 3 4 5]
 
 Also see `duckdb-query-value' for scalar extraction.
+Also see `duckdb-query-row' for single row extraction.
+Also see `duckdb-query' with :format :column for first column.
 Also see `duckdb-query' with :format :columnar for multiple columns."
   (let* ((column (plist-get args :column))
          (as-vector (plist-get args :as-vector))
@@ -207,6 +274,9 @@ Also see `duckdb-query' with :format :columnar for multiple columns."
       col-data)
      (t
       (append col-data nil)))))
+
+
+
 
 ;;;; Schema Introspection
 
@@ -2024,14 +2094,39 @@ DATABASE is optional database file path.  When nil, uses
 TIMEOUT is optional execution timeout in seconds.  Defaults to
 `duckdb-query-default-timeout'.
 
-FORMAT is output structure:
-  :alist     - list of alists (default)
-  :plist     - list of plists
-  :hash      - list of hash-tables
-  :vector    - vector of alists
-  :columnar  - alist of column vectors
-  :org-table - list of lists for `org-mode' tables
-  :raw       - unprocessed output string from executor
+FORMAT controls the return structure:
+
+  :alist      List of alists (default)
+              => (((col1 . val1) (col2 . val2)) ...)
+
+  :plist      List of plists
+              => ((:col1 val1 :col2 val2) ...)
+
+  :hash       List of hash tables
+              => (#<hash-table> #<hash-table> ...)
+
+  :vector     Vector of alists
+              => [((col1 . val1) ...) ...]
+
+  :columnar   Alist of column vectors
+              => ((col1 . [v1 v2 ...]) (col2 . [v1 v2 ...]))
+
+  :org-table  List of lists with header row
+              => ((col1 col2) (val1 val2) ...)
+
+  :single     Single scalar value
+              Signals error if query returns multiple rows or columns.
+              => value
+
+  :row        Single row as alist
+              Signals error if query returns multiple rows.
+              => ((col1 . val1) (col2 . val2) ...)
+
+  :column     Single column as list (first column if multiple)
+              => (val1 val2 val3 ...)
+
+  :raw        Unprocessed JSON string from DuckDB
+              => \"[{...}]\"
 
 EXECUTOR controls execution strategy:
   :cli       - Direct CLI invocation (default)
@@ -2046,12 +2141,13 @@ OUTPUT-VIA controls how results are transferred from DuckDB:
                use with :preserve-nested for nested types)
 
 When OUTPUT-VIA is `:file' and QUERY cannot be wrapped in
-COPY \(DDL, DML,DESCRIBE statements), automatically falls back to `:pipe'.
+COPY \(DDL, DML, DESCRIBE statements), automatically falls back to `:pipe'.
 
-DATA enables querying Elisp data structures via @SYMBOL references.
-Values must be actual data, not symbols; use backquote for variables:
+DATA enables querying Elisp data structures via @SYMBOL or @data:SYMBOL
+references.  Values must be actual data, not symbols; use backquote for
+variables:
 
-  Direct data (referenced as @data):
+  Direct data (referenced as @data or @data:data):
     :data \\='(((id . 1) (name . \"Alice\")) ...)
 
   Named bindings (use backquote with comma for variables):
@@ -2060,10 +2156,7 @@ Values must be actual data, not symbols; use backquote for variables:
 
 DATA-FORMAT controls how DATA is serialized to temporary files:
   :json - JSON array via native `json-serialize' (default)
-          Faster (~2x vs CSV), preserves nested types, handles
-          :null and :false correctly.
-  :csv  - CSV format for compatibility with tools expecting CSV.
-          Use when joining with CSV files or for debugging.
+  :csv  - CSV format for compatibility
 
 VAR binds values to @var:NAME references as SQL variables:
 
@@ -2071,63 +2164,42 @@ VAR binds values to @var:NAME references as SQL variables:
          (pattern . \"O'Brien%\")
          (active . t))
 
-  Variables are set via SET VARIABLE before query execution and
-  accessed via getvariable() in the query.  Variables are reset
-  after execution to avoid polluting session state.
-
-  Variable values support:
-    integer, float  -> numeric literal
-    string          -> quoted, escaped string (injection-safe)
-    t               -> TRUE
-    :false          -> FALSE
-    :null           -> NULL
-    vector          -> SQL list
-    alist           -> SQL struct
-
-  For query-assigned variables, use (:expr . \"SQL\"):
-    :var \\=`((file_list . (:expr . \"SELECT list(file) FROM files\")))
+  Variables are set via SET VARIABLE and accessed via getvariable().
+  Safe from SQL injection for any value type.
 
 PRESERVE-NESTED when non-nil and OUTPUT-VIA is `:pipe', wraps STRUCT,
 MAP, LIST, and ARRAY columns with to_json() so they return as nested
 Elisp structures instead of string representations.
-
-When OUTPUT-VIA is `:file' (the default), nested types serialize
-correctly without this parameter.  PRESERVE-NESTED is only needed
-when explicitly using `:output-via :pipe'.
 
 Additional keyword arguments in ARGS are passed to EXECUTOR.
 
 Returns nil for empty results.
 Returns converted data in FORMAT for successful queries.
 
-QUERY may contain @org:NAME references to named org tables in current
-buffer, resolved via `org-babel-ref-resolve'.  Use @org:FILE:NAME for
-tables in other files.
-
 Examples:
 
-  ;; Simple query (uses fast file output by default)
+  ;; Simple query
   (duckdb-query \"SELECT 42 as answer\")
   ;; => (((answer . 42)))
 
-  ;; Nested types work automatically with file output
-  (duckdb-query \"SELECT {'x':1,'y':2}::STRUCT(x INT,y INT) as p\")
-  ;; => (((p (x . 1) (y . 2))))
+  ;; Single value extraction
+  (duckdb-query \"SELECT COUNT(*) FROM users\" :format :single)
+  ;; => 42
 
-  ;; DDL falls back to pipe automatically
-  (duckdb-query \"CREATE TABLE test (id INT)\" :readonly nil)
+  ;; Single row extraction
+  (duckdb-query \"SELECT * FROM users WHERE id = 1\" :format :row)
+  ;; => ((id . 1) (name . \"Alice\"))
 
-  ;; Explicit pipe mode with preserve-nested
-  (duckdb-query \"SELECT * FROM nested_table\"
-                :output-via :pipe
-                :preserve-nested t)
+  ;; Column extraction
+  (duckdb-query \"SELECT name FROM users\" :format :column)
+  ;; => (\"Alice\" \"Bob\" \"Carol\")
 
   ;; Variable binding for safe parameterization
   (duckdb-query \"SELECT * FROM users WHERE age >= @var:min_age\"
                 :var \\='((min_age . 18)))
 
 Uses `duckdb-query-execute' for execution dispatch.
-Uses `duckdb-query--substitute-data-refs' for @symbol replacement.
+Uses `duckdb-query--substitute-data-refs' for @data: replacement.
 Uses `duckdb-query--substitute-org-refs' for @org: replacement.
 Uses `duckdb-query--substitute-var-refs' for @var: replacement."
   (let* ((executor (duckdb-query--resolve-executor executor))
@@ -2221,8 +2293,31 @@ Uses `duckdb-query--substitute-var-refs' for @var: replacement."
                                        :array-type 'list
                                        :null-object duckdb-query-null-value
                                        :false-object duckdb-query-false-value)))
+                  (:single
+                   (duckdb-query--extract-single
+                    (json-parse-string output
+                                       :object-type 'alist
+                                       :array-type 'list
+                                       :null-object duckdb-query-null-value
+                                       :false-object duckdb-query-false-value)
+                    ":single format"))
+                  (:row
+                   (duckdb-query--extract-row
+                    (json-parse-string output
+                                       :object-type 'alist
+                                       :array-type 'list
+                                       :null-object duckdb-query-null-value
+                                       :false-object duckdb-query-false-value)
+                    ":row format"))
+                  (:column
+                   (duckdb-query--extract-column
+                    (json-parse-string output
+                                       :object-type 'alist
+                                       :array-type 'list
+                                       :null-object duckdb-query-null-value
+                                       :false-object duckdb-query-false-value)))
                   (_
-                   (error "Unknown format: %s.  Valid: :alist :plist :hash :vector :columnar :org-table :raw"
+                   (error "Unknown format: %s.  Valid: :alist :plist :hash :vector :columnar :org-table :single :row :column :raw"
                           format))))
 
                ;; DuckDB error message - signal error
@@ -2231,10 +2326,8 @@ Uses `duckdb-query--substitute-var-refs' for @var: replacement."
                  (duckdb-query--strip-ansi trimmed))
                 (error "DuckDB error: %s" (duckdb-query--strip-ansi trimmed)))
 
-               ;; DDL/DML success - non-JSON, non-error output (e.g., prompt char "D")
-               ;; Return nil to indicate successful execution with no result set
-               (t
-                nil)))))
+               ;; DDL/DML success - non-JSON, non-error output
+               (t nil)))))
       ;; Cleanup: reset variables in session mode
       (when (and var (eq executor :session))
         (ignore-errors
