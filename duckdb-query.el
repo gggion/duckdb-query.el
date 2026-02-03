@@ -1864,85 +1864,84 @@ Called by `duckdb-query--substitute-data-refs' when :data-format is :csv."
 ;;;;; Data Reference Substitution
 
 (defun duckdb-query--substitute-data-refs (query data data-format temp-files)
-  "Replace @SYMBOL references in QUERY with temp file paths.
+"Replace @data:NAME and @NAME references in QUERY with temp file paths.
 
 DATA is the :data parameter in one of these forms:
-  - List of alists: bound to @data implicitly
-  - Alist of (SYMBOL . VALUE) pairs: symbols become @symbol references
+- List of alists: bound to @data implicitly
+- Alist of (SYMBOL . VALUE) pairs: symbols become @data:symbol or @symbol
 
-Values must be actual alist data, not symbols to be evaluated.
-Use backquote with comma to pass lexical variables:
-
-  (let ((my-data \\='(((id . 1)))))
-    (duckdb-query \"SELECT * FROM @data\" :data \\=`((data . ,my-data))))
+Both @data:NAME (explicit) and @NAME (shorthand) are recognized.
+The explicit form is preferred for clarity when mixing reference types.
 
 DATA-FORMAT controls serialization:
-  :json - JSON array via `json-serialize' (default, faster, better types)
+  :json - JSON array via `json-serialize' (default)
   :csv  - CSV via `duckdb-query--alist-to-csv-file' (for compatibility)
 
-TEMP-FILES is hash table mapping symbols to temp file paths for
-cleanup tracking.
+TEMP-FILES is hash table mapping symbols to temp file paths for cleanup.
 
 Return modified query string.
 
 Examples:
-  Single source (implicit @data):
-    :data \\='(((id . 1) (name . \"Alice\")))
+Explicit form:
+:data \\=`((users . ,user-data))
+\"SELECT * FROM @data:users\"
 
-  Named bindings with backquote:
-    :data \\=`((orders . ,my-orders-var))
-    :data \\=`((orders . ,orders) (users . ,users))
+Shorthand form (existing behavior):
+:data \\=`((users . ,user-data))
+\"SELECT * FROM @users\"
 
-Called by `duckdb-query' when DATA parameter is provided."
-  (let ((result query)
-        (serializer (if (eq data-format :csv)
-                        #'duckdb-query--alist-to-csv-file
-                      #'duckdb-query--alist-to-json-file))
-        (file-ext (if (eq data-format :csv) ".csv" ".json"))
-        (bindings
-         (cond
-          ;; nil -> no bindings
-          ((null data)
-           nil)
-
-          ;; Direct data: list of alists -> bind to 'data
-          ;; Detect by checking if first element looks like a row (alist)
-          ;; rather than a binding (symbol . list-of-alists)
-          ((and (listp data)
-                (listp (car data))
-                (consp (caar data)))
-           `((data . ,data)))
-
-          ;; List of bindings: each should be (symbol . alist-data)
-          (t
-           (mapcar
-            (lambda (binding)
-              (pcase binding
-                (`(,(and sym (pred symbolp))
-                   . ,(and value
-                           (pred listp)
-                           (pred (lambda (v)
-                                   (and v
-                                        (listp (car v))
-                                        (consp (caar v)))))))
-                 (cons sym value))
-                (_
-                 (error "Invalid data binding: %S.  Expected (symbol . alist-data); use backquote: \\=`((sym . ,var))" binding))))
-            data)))))
-
-    ;; Substitute each binding
-    (pcase-dolist (`(,sym . ,alist-data) bindings)
-      (let* ((pattern (format "@%s\\b" (regexp-quote (symbol-name sym))))
-             (temp-file (make-temp-file
-                         (format "duckdb-data-%s-" sym)
-                         nil file-ext)))
-        (funcall serializer alist-data temp-file)
-        (puthash sym temp-file temp-files)
-        (setq result (replace-regexp-in-string
-                      pattern
-                      (format "'%s'" temp-file)
-                      result t t))))
-    result))
+Both forms are equivalent.  Explicit form recommended when query
+contains @org: and @var: references for visual consistency."
+(let ((result query)
+    (serializer (if (eq data-format :csv)
+                    #'duckdb-query--alist-to-csv-file
+                    #'duckdb-query--alist-to-json-file))
+    (file-ext (if (eq data-format :csv) ".csv" ".json"))
+    (bindings
+        (cond
+        ;; nil -> no bindings
+        ((null data)
+        nil)
+        ;; Direct data: list of alists -> bind to 'data
+        ((and (listp data)
+            (listp (car data))
+            (consp (caar data)))
+        `((data . ,data)))
+        ;; List of bindings
+        (t
+        (mapcar
+        (lambda (binding)
+            (pcase binding
+            (`(,(and sym (pred symbolp))
+                . ,(and value (pred listp) (pred (lambda (v)
+                                                    (and v (listp (car v)) (consp (caar v)))))))
+                (cons sym value))
+            (_
+                (error "Invalid data binding: %S" binding))))
+        data)))))
+;; Substitute each binding - try explicit @data:NAME first, then @NAME
+(pcase-dolist (`(,sym . ,alist-data) bindings)
+    (let* ((sym-name (symbol-name sym))
+            ;; Pattern for explicit @data:NAME
+            (explicit-pattern (format "@data:%s\\b" (regexp-quote sym-name)))
+            ;; Pattern for shorthand @NAME
+            (shorthand-pattern (format "@%s\\b" (regexp-quote sym-name)))
+            (temp-file (make-temp-file
+                        (format "duckdb-data-%s-" sym)
+                        nil file-ext)))
+    (funcall serializer alist-data temp-file)
+    (puthash sym temp-file temp-files)
+    ;; Replace explicit form first
+    (setq result (replace-regexp-in-string
+                    explicit-pattern
+                    (format "'%s'" temp-file)
+                    result t t))
+    ;; Then replace shorthand form
+    (setq result (replace-regexp-in-string
+                    shorthand-pattern
+                    (format "'%s'" temp-file)
+                    result t t))))
+result))
 
 ;;;;; Variable Reference Substitution
 
