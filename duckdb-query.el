@@ -2016,45 +2016,76 @@ result))
 ;;;;; Variable Reference Substitution
 
 (defun duckdb-query--substitute-var-refs (query var-bindings)
-  "Replace @var:NAME references in QUERY with call to getvariable().
+  "Replace @var:NAME and @expr:NAME references in QUERY.
 
-QUERY is SQL string potentially containing @var:NAME references.
+QUERY is SQL string potentially containing references:
+  @var:NAME  - Literal value, quoted appropriately
+  @expr:NAME - SQL expression, passed through unquoted
+
 VAR-BINDINGS is alist of (name . value) pairs from :var parameter.
+Values are treated as literals for @var: references and as SQL
+expressions for @expr: references.
 
 Returns (SUBSTITUTED-QUERY . VAR-SETUP-SQL) where:
-  SUBSTITUTED-QUERY has @var:NAME replaced with getvariable('NAME')
-  VAR-SETUP-SQL is SQL statements to SET VARIABLE for each binding
-
-Variables are set before query execution and should be reset after
-via `duckdb-query--var-reset-sql'.
+SUBSTITUTED-QUERY has references replaced with getvariable('NAME')
+VAR-SETUP-SQL is SQL statements to SET VARIABLE for each binding
 
 Example:
   (duckdb-query--substitute-var-refs
-   \"SELECT * FROM t WHERE x > @var:threshold\"
-   \\='((threshold . 100)))
-  => (\"SELECT * FROM t WHERE x > getvariable('threshold')\"
-      . \"SET VARIABLE threshold = 100;\\n\")"
+   \"SELECT @var:x, @expr:y\"
+   \\='((x . 100) (y . \"(SELECT 1 + 1)\")))
+  => (\"SELECT getvariable('x'), getvariable('y')\"
+      . \"SET VARIABLE x = 100;\\nSET VARIABLE y = (SELECT 1 + 1);\\n\")"
   (let ((result query)
         (setup-sql "")
-        (var-ref-pattern "@var:\\([a-zA-Z_][a-zA-Z0-9_]*\\)"))
-    ;; Build SET VARIABLE statements for all bindings
-    (dolist (binding var-bindings)
-      (let* ((name (symbol-name (car binding)))
-             (value (cdr binding))
-             (sql-value (duckdb-query--value-to-sql-literal value)))
-        (setq setup-sql
-              (concat setup-sql
-                      (format "SET VARIABLE %s = %s;\n" name sql-value)))))
-    ;; Replace @var:NAME with getvariable('NAME')
-    (while (string-match var-ref-pattern result)
-      (let ((var-name (match-string 1 result)))
-        ;; Verify binding exists
-        (unless (assq (intern var-name) var-bindings)
-          (error "Variable @var:%s referenced but not bound in :var parameter"
-                 var-name))
-        (setq result (replace-match
-                      (format "getvariable('%s')" var-name)
-                      t t result))))
+        (used-vars nil)
+        ;; Pattern for @var:NAME (literal binding)
+        (var-ref-pattern "@var:\\([a-zA-Z_][a-zA-Z0-9_]*\\)")
+        ;; Pattern for @expr:NAME (expression binding)
+        (expr-ref-pattern "@expr:\\([a-zA-Z_][a-zA-Z0-9_]*\\)"))
+
+    ;; Collect all @var: references and replace with getvariable()
+    (let ((temp-result result))
+      (while (string-match var-ref-pattern temp-result)
+        (let ((var-name (match-string 1 temp-result)))
+          (push (cons (intern var-name) :literal) used-vars)
+          (setq temp-result (substring temp-result (match-end 0)))))
+      (setq result (replace-regexp-in-string
+                    var-ref-pattern
+                    "getvariable('\\1')"
+                    result t)))
+
+    ;; Collect all @expr: references and replace with getvariable()
+    (let ((temp-result result))
+      (while (string-match expr-ref-pattern temp-result)
+        (let ((var-name (match-string 1 temp-result)))
+          (push (cons (intern var-name) :expr) used-vars)
+          (setq temp-result (substring temp-result (match-end 0)))))
+      (setq result (replace-regexp-in-string
+                    expr-ref-pattern
+                    "getvariable('\\1')"
+                    result t)))
+
+    ;; Build SET VARIABLE statements for used bindings
+    (dolist (used (nreverse used-vars))
+      (let* ((sym (car used))
+             (ref-type (cdr used))
+             (binding (assq sym var-bindings))
+             (name (symbol-name sym)))
+        (unless binding
+          (error "Variable @%s:%s referenced but not bound in :var parameter"
+                 (if (eq ref-type :expr) "expr" "var")
+                 name))
+        (let* ((value (cdr binding))
+               (sql-value (if (eq ref-type :expr)
+                              ;; Expression: pass through as-is
+                              value
+                            ;; Literal: convert to SQL literal
+                            (duckdb-query--value-to-sql-literal value))))
+          (setq setup-sql
+                (concat setup-sql
+                        (format "SET VARIABLE %s = %s;\n" name sql-value))))))
+
     (cons result setup-sql)))
 
 (defun duckdb-query--var-reset-sql (var-bindings)
@@ -2158,14 +2189,27 @@ DATA-FORMAT controls how DATA is serialized to temporary files:
   :json - JSON array via native `json-serialize' (default)
   :csv  - CSV format for compatibility
 
-VAR binds values to @var:NAME references as SQL variables:
+VAR binds values to @var:NAME and @expr:NAME references:
 
   :var \\=`((threshold . 100)
          (pattern . \"O'Brien%\")
-         (active . t))
+         (ids . \"(SELECT list(id) FROM active_users)\"))
 
-  Variables are set via SET VARIABLE and accessed via getvariable().
-  Safe from SQL injection for any value type.
+  @var:NAME  - Value is quoted as SQL literal (safe for user input)
+  @expr:NAME - Value is passed as SQL expression (for computed values)
+
+Both reference types use getvariable() at runtime, but differ in how
+the value is set:
+
+  @var:threshold with value 100
+    => SET VARIABLE threshold = 100;
+
+  @expr:ids with value \"(SELECT list(id) FROM t)\"
+    => SET VARIABLE ids = (SELECT list(id) FROM t);
+
+Use @var: for user-provided data (strings, numbers, etc.).
+Use @expr: when the value must be computed by DuckDB (subqueries,
+aggregations, dynamic lists).
 
 PRESERVE-NESTED when non-nil and OUTPUT-VIA is `:pipe', wraps STRUCT,
 MAP, LIST, and ARRAY columns with to_json() so they return as nested
