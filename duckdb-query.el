@@ -1589,6 +1589,75 @@ Called by `duckdb-query'."
                              (substring result match-end)))))
     result))
 
+;;;;; SQL Literal Conversion
+
+(defun duckdb-query--value-to-sql-literal (value)
+  "Convert Elisp VALUE to SQL literal string.
+
+Handles:
+  integer, float    → numeric literal
+  string            → quoted string with escaped quotes
+  t                 → TRUE
+  :false            → FALSE
+  :null, nil        → NULL
+  vector            → SQL list [v1, v2, ...]
+  alist             → SQL struct {\\='k1\\=': v1, ...}
+  (:expr . string)  → unquoted expression (for query assignment)
+
+Examples:
+  42                  → \"42\"
+  3.14                → \"3.14\"
+  \"O\\='Brien\"         → \"\\='O\\='\\='Brien\\='\"
+  t                   → \"TRUE\"
+  :false              → \"FALSE\"
+  [1 2 3]             → \"[1, 2, 3]\"
+  ((a . 1) (b . 2))   → \"{\\='a\\=': 1, \\='b\\=': 2}\"
+  (:expr . \"...\")   → \"...\""
+  (cond
+   ;; Expression passthrough (for query assignment)
+   ((and (consp value)
+         (eq (car value) :expr))
+    (cdr value))
+   ;; NULL
+   ((or (null value) (eq value :null))
+    "NULL")
+   ;; Boolean
+   ((eq value t)
+    "TRUE")
+   ((eq value :false)
+    "FALSE")
+   ;; Integer
+   ((integerp value)
+    (number-to-string value))
+   ;; Float
+   ((floatp value)
+    (number-to-string value))
+   ;; String - quote and escape internal quotes
+   ((stringp value)
+    (format "'%s'" (replace-regexp-in-string "'" "''" value)))
+   ;; Vector - SQL list
+   ((vectorp value)
+    (format "[%s]"
+            (mapconcat #'duckdb-query--value-to-sql-literal value ", ")))
+   ;; Alist - SQL struct
+   ((and (listp value)
+         (consp (car value))
+         (symbolp (caar value)))
+    (format "{%s}"
+            (mapconcat
+             (lambda (pair)
+               (format "'%s': %s"
+                       (symbol-name (car pair))
+                       (duckdb-query--value-to-sql-literal (cdr pair))))
+             value
+             ", ")))
+   ;; List (non-alist) - treat as SQL list
+   ((listp value)
+    (format "[%s]"
+            (mapconcat #'duckdb-query--value-to-sql-literal value ", ")))
+   ;; Fallback
+   (t
+    (error "Cannot convert %S to SQL literal" value))))
 ;;;; Nested Type Preservation
 (defun duckdb-query--nested-type-p (type-string)
   "Return non-nil if TYPE-STRING represents a nested DuckDB type.
@@ -1792,6 +1861,8 @@ Called by `duckdb-query--substitute-data-refs' when :data-format is :csv."
           row ",")
          "\n")))))
 
+;;;;; Data Reference Substitution
+
 (defun duckdb-query--substitute-data-refs (query data data-format temp-files)
   "Replace @SYMBOL references in QUERY with temp file paths.
 
@@ -1873,6 +1944,62 @@ Called by `duckdb-query' when DATA parameter is provided."
                       result t t))))
     result))
 
+;;;;; Variable Reference Substitution
+
+(defun duckdb-query--substitute-var-refs (query var-bindings)
+  "Replace @var:NAME references in QUERY with call to getvariable().
+
+QUERY is SQL string potentially containing @var:NAME references.
+VAR-BINDINGS is alist of (name . value) pairs from :var parameter.
+
+Returns (SUBSTITUTED-QUERY . VAR-SETUP-SQL) where:
+  SUBSTITUTED-QUERY has @var:NAME replaced with getvariable('NAME')
+  VAR-SETUP-SQL is SQL statements to SET VARIABLE for each binding
+
+Variables are set before query execution and should be reset after
+via `duckdb-query--var-reset-sql'.
+
+Example:
+  (duckdb-query--substitute-var-refs
+   \"SELECT * FROM t WHERE x > @var:threshold\"
+   \\='((threshold . 100)))
+  => (\"SELECT * FROM t WHERE x > getvariable('threshold')\"
+      . \"SET VARIABLE threshold = 100;\\n\")"
+  (let ((result query)
+        (setup-sql "")
+        (var-ref-pattern "@var:\\([a-zA-Z_][a-zA-Z0-9_]*\\)"))
+    ;; Build SET VARIABLE statements for all bindings
+    (dolist (binding var-bindings)
+      (let* ((name (symbol-name (car binding)))
+             (value (cdr binding))
+             (sql-value (duckdb-query--value-to-sql-literal value)))
+        (setq setup-sql
+              (concat setup-sql
+                      (format "SET VARIABLE %s = %s;\n" name sql-value)))))
+    ;; Replace @var:NAME with getvariable('NAME')
+    (while (string-match var-ref-pattern result)
+      (let ((var-name (match-string 1 result)))
+        ;; Verify binding exists
+        (unless (assq (intern var-name) var-bindings)
+          (error "Variable @var:%s referenced but not bound in :var parameter"
+                 var-name))
+        (setq result (replace-match
+                      (format "getvariable('%s')" var-name)
+                      t t result))))
+    (cons result setup-sql)))
+
+(defun duckdb-query--var-reset-sql (var-bindings)
+  "Generate RESET VARIABLE statements for VAR-BINDINGS.
+
+Returns SQL string with RESET VARIABLE for each binding.
+Used in cleanup to avoid polluting session state."
+  (mapconcat
+   (lambda (binding)
+     (format "RESET VARIABLE %s;" (symbol-name (car binding))))
+   var-bindings
+   "\n"))
+
+
 ;;;; Main Entry Point
 
 (cl-defun duckdb-query (query &rest args &key
@@ -1883,12 +2010,14 @@ Called by `duckdb-query' when DATA parameter is provided."
                               (output-via :file)
                               data
                               (data-format :json)
+                              var
                               preserve-nested
                               &allow-other-keys)
   "Execute QUERY and return results in FORMAT.
 
 QUERY is SQL string to execute.  May contain @SYMBOL references to
-Elisp data provided via DATA parameter.
+Elisp data provided via DATA parameter, @org:NAME references to
+org tables, or @var:NAME references to SQL variables.
 
 DATABASE is optional database file path.  When nil, uses
 `duckdb-query-default-database' if set, otherwise in-memory database.
@@ -1937,6 +2066,28 @@ DATA-FORMAT controls how DATA is serialized to temporary files:
   :csv  - CSV format for compatibility with tools expecting CSV.
           Use when joining with CSV files or for debugging.
 
+VAR binds values to @var:NAME references as SQL variables:
+
+  :var \\=`((threshold . 100)
+         (pattern . \"O'Brien%\")
+         (active . t))
+
+  Variables are set via SET VARIABLE before query execution and
+  accessed via getvariable() in the query.  Variables are reset
+  after execution to avoid polluting session state.
+
+  Variable values support:
+    integer, float  -> numeric literal
+    string          -> quoted, escaped string (injection-safe)
+    t               -> TRUE
+    :false          -> FALSE
+    :null           -> NULL
+    vector          -> SQL list
+    alist           -> SQL struct
+
+  For query-assigned variables, use (:expr . \"SQL\"):
+    :var \\=`((file_list . (:expr . \"SELECT list(file) FROM files\")))
+
 PRESERVE-NESTED when non-nil and OUTPUT-VIA is `:pipe', wraps STRUCT,
 MAP, LIST, and ARRAY columns with to_json() so they return as nested
 Elisp structures instead of string representations.
@@ -1972,34 +2123,49 @@ Examples:
                 :output-via :pipe
                 :preserve-nested t)
 
+  ;; Variable binding for safe parameterization
+  (duckdb-query \"SELECT * FROM users WHERE age >= @var:min_age\"
+                :var \\='((min_age . 18)))
+
 Uses `duckdb-query-execute' for execution dispatch.
 Uses `duckdb-query--substitute-data-refs' for @symbol replacement.
-Uses `duckdb-query--substitute-org-refs' for @org: replacement."
+Uses `duckdb-query--substitute-org-refs' for @org: replacement.
+Uses `duckdb-query--substitute-var-refs' for @var: replacement."
   (let* ((executor (duckdb-query--resolve-executor executor))
          (temp-files (make-hash-table :test 'eq))
-         ;; First: resolve @org: references
+         ;; Step 1: Resolve @org: references
          (org-resolved-query (duckdb-query--substitute-org-refs query temp-files))
-         ;; Then: substitute @data references
-         (substituted-query (if data
-                                (duckdb-query--substitute-data-refs
-                                 org-resolved-query data data-format temp-files)
-                              org-resolved-query))
-         ;; Then: wrap for nested preservation (only for pipe mode)
+         ;; Step 2: Substitute @data: and @ references
+         (data-resolved-query (if data
+                                  (duckdb-query--substitute-data-refs
+                                   org-resolved-query data data-format temp-files)
+                                org-resolved-query))
+         ;; Step 3: Substitute @var: references
+         (var-result (if var
+                         (duckdb-query--substitute-var-refs data-resolved-query var)
+                       (cons data-resolved-query "")))
+         (substituted-query (car var-result))
+         (var-setup-sql (cdr var-result))
+         ;; Step 4: Wrap for nested preservation if needed
          (effective-query (if (and preserve-nested
                                    (or (eq output-via :pipe)
                                        (eq executor :session)))
                               (duckdb-query--wrap-nested-columns substituted-query)
                             substituted-query))
+         ;; Combine variable setup with query
+         (full-query (if (string-empty-p var-setup-sql)
+                         effective-query
+                       (concat var-setup-sql effective-query)))
          (db (or database duckdb-query-default-database))
          (clean-args (cl-loop for (k v) on args by #'cddr
-                              unless (memq k '(:data :data-format :preserve-nested))
+                              unless (memq k '(:data :data-format :var :preserve-nested))
                               append (list k v)))
          (output nil))
     (unwind-protect
         (progn
           (setq output (apply #'duckdb-query-execute
                               executor
-                              effective-query
+                              full-query
                               :database db
                               :timeout timeout
                               :output-via output-via
@@ -2070,6 +2236,13 @@ Uses `duckdb-query--substitute-org-refs' for @org: replacement."
                ;; Return nil to indicate successful execution with no result set
                (t
                 nil)))))
+      ;; Cleanup: reset variables in session mode
+      (when (and var (eq executor :session))
+        (ignore-errors
+          (duckdb-query-session-execute
+           duckdb-query--current-session
+           (duckdb-query--var-reset-sql var)
+           5)))
       ;; Cleanup temp files
       (maphash (lambda (_sym file)
                  (when (file-exists-p file)
