@@ -2118,6 +2118,49 @@ Used in cleanup to avoid polluting session state."
      all-names
      "\n")))
 
+(defun duckdb-query--substitute-sql-refs (query sql-bindings)
+  "Replace @sql:NAME references in QUERY with SQL fragments.
+
+SQL-BINDINGS is alist of (name . sql-fragment) pairs.
+Each @sql:NAME reference is replaced with the corresponding fragment.
+Users should wrap references in parentheses when used as subqueries:
+  FROM (@sql:base)  =>  FROM (SELECT * FROM users)
+
+Returns modified query string.
+
+Signals =user-error' if @sql:NAME appears but NAME is not in SQL-BINDINGS.
+
+Example:
+  (duckdb-query--substitute-sql-refs
+   \"SELECT * FROM (@sql:base) WHERE x > 1\"
+   \\='((base . \"SELECT id, name FROM users\")))
+  => \"SELECT * FROM (SELECT id, name FROM users) WHERE x > 1\"
+
+Called by =duckdb-query' before other reference substitutions."
+  (let ((result query)
+        (sql-ref-pattern "@sql:\\([a-zA-Z_][a-zA-Z0-9_]*\\)"))
+    ;; Collect all @sql: references first to validate
+    (let ((refs nil)
+          (temp-query query))
+      (while (string-match sql-ref-pattern temp-query)
+        (push (intern (match-string 1 temp-query)) refs)
+        (setq temp-query (substring temp-query (match-end 0))))
+      ;; Validate all references exist in bindings
+      (dolist (ref (nreverse refs))
+        (unless (assq ref sql-bindings)
+          (user-error "@sql:%s in query but '%s' not found in :sql parameter"
+                      ref ref))))
+    ;; Perform substitutions - direct text replacement, no wrapping
+    (dolist (binding sql-bindings)
+      (let* ((name (symbol-name (car binding)))
+             (fragment (cdr binding))
+             (pattern (format "@sql:%s\\b" (regexp-quote name))))
+        (setq result (replace-regexp-in-string
+                      pattern
+                      fragment
+                      result t t))))
+    result))
+
 
 ;;;; Main Entry Point
 
@@ -2131,14 +2174,66 @@ Used in cleanup to avoid polluting session state."
                               (data-format :json)
                               var
                               expr
+                              sql
                               preserve-nested
                               &allow-other-keys)
   "Execute QUERY and return results in FORMAT.
 
-QUERY is SQL string to execute.  May contain @SYMBOL references to
-Elisp data provided via DATA parameter, @org:NAME references to
-org tables, @var:NAME references to literal values, or @expr:NAME
-references to SQL expressions.
+QUERY is SQL string with optional inline references:
+
+  @org:name         Org table from current buffer
+  @org:file:name    Org table from FILE
+  @data:name        Elisp data from DATA parameter
+  @var:name         Literal value from VAR parameter
+  @expr:name        SQL expression from EXPR parameter
+  @sql:name         Query fragment from SQL parameter
+
+DATA binds Elisp data structures to @data: references:
+
+  Direct binding (referenced as @data or @data:data):
+    :data \\='(((id . 1) (name . \"Alice\")) ...)
+
+  Named bindings:
+    :data \\=`((users . ,user-data)
+            (orders . ,order-data))
+
+VAR binds literal values to @var:NAME references:
+
+  :var \\='((name . \"Alice\")
+         (age . 30)
+         (pattern . \"O'Brien%\"))
+
+  Values are converted to SQL literals with proper quoting.
+  Safe for user input - strings are escaped automatically.
+
+EXPR binds SQL expressions to @expr:NAME references:
+
+  :expr \\='((threshold . \"(SELECT AVG(score) FROM scores)\")
+          (ids . \"(SELECT list(id) FROM active_users)\"))
+
+  Values are passed through as raw SQL and executed.
+  Use for subqueries, aggregations, and computed values.
+
+SQL binds query fragments to @sql:NAME references:
+
+  :sql \\='((active_users . \"SELECT * FROM users WHERE status = \\='active\\='\")
+        (recent_orders . \"SELECT * FROM orders WHERE date > CURRENT_DATE - 30\"))
+
+  Fragments are substituted as parenthesized subqueries before other
+  reference types are processed.  This enables query composition without
+  string interpolation.
+
+  Unlike :var (which quotes values safely) and :expr (which evaluates
+  expressions), :sql performs direct text substitution.
+
+The reference type in QUERY must match the parameter:
+  - @var:x requires x to be in :var
+  - @expr:x requires x to be in :expr
+  - @sql:x requires x to be in :sql
+  Mismatches signal an error with a helpful message.
+
+Important: @expr: expressions execute BEFORE the main query.
+They cannot reference CTEs defined in the same query.
 
 DATABASE is optional database file path.  When nil, uses
 `duckdb-query-default-database' if set, otherwise in-memory database.
@@ -2195,45 +2290,9 @@ OUTPUT-VIA controls how results are transferred from DuckDB:
 When OUTPUT-VIA is `:file' and QUERY cannot be wrapped in
 COPY (DDL, DML, DESCRIBE statements), automatically falls back to `:pipe'.
 
-DATA enables querying Elisp data structures via @SYMBOL or @data:SYMBOL
-references.  Values must be actual data, not symbols; use backquote for
-variables:
-
-  Direct data (referenced as @data or @data:data):
-    :data \\='(((id . 1) (name . \"Alice\")) ...)
-
-  Named bindings (use backquote with comma for variables):
-    :data \\=`((orders . ,my-orders-var)
-            (users . ,my-users-var))
-
 DATA-FORMAT controls how DATA is serialized to temporary files:
   :json - JSON array via native `json-serialize' (default)
   :csv  - CSV format for compatibility
-
-VAR binds literal values to @var:NAME references:
-
-  :var \\='((name . \"Alice\")
-         (age . 30)
-         (pattern . \"O'Brien%\"))
-
-  Values are converted to SQL literals with proper quoting.
-  Safe for user input - strings are escaped automatically.
-
-EXPR binds SQL expressions to @expr:NAME references:
-
-  :expr \\='((threshold . \"(SELECT AVG(score) FROM scores)\")
-          (ids . \"(SELECT list(id) FROM active_users)\"))
-
-  Values are passed through as raw SQL and executed.
-  Use for subqueries, aggregations, and computed values.
-
-The reference type in QUERY must match the parameter:
-  - @var:x requires x to be in :var
-  - @expr:x requires x to be in :expr
-  Mismatches signal an error with a helpful message.
-
-Important: @expr: expressions execute BEFORE the main query.
-They cannot reference CTEs defined in the same query.
 
 PRESERVE-NESTED when non-nil and OUTPUT-VIA is `:pipe', wraps STRUCT,
 MAP, LIST, and ARRAY columns with to_json() so they return as nested
@@ -2262,22 +2321,33 @@ Examples:
   (duckdb-query \"SELECT * FROM scores WHERE val > @expr:avg\"
                 :expr \\='((avg . \"(SELECT AVG(val) FROM scores)\")))
 
-  ;; Combined variable and expression binding
+  ;; SQL fragment composition
+  (duckdb-query \"SELECT * FROM (@sql:base) WHERE active\"
+                :sql \\='((base . \"SELECT * FROM users\")))
+
+  ;; Combined bindings
   (duckdb-query
-   \"SELECT * FROM users
-    WHERE name LIKE @var:pattern
-      AND score > @expr:threshold\"
-   :var \\='((pattern . \"%smith%\"))
-   :expr \\='((threshold . \"(SELECT AVG(score) FROM users)\")))
+   \"SELECT * FROM (@sql:filtered)
+    WHERE score > @expr:threshold
+      AND name LIKE @var:pattern\"
+   :sql \\='((filtered . \"SELECT * FROM users WHERE status = \\='active\\='\"))
+   :expr \\='((threshold . \"(SELECT AVG(score) FROM users)\"))
+   :var \\='((pattern . \"%smith%\")))
 
 Uses `duckdb-query-execute' for execution dispatch.
+Uses `duckdb-query--substitute-sql-refs' for @sql: replacement.
 Uses `duckdb-query--substitute-data-refs' for @data: replacement.
 Uses `duckdb-query--substitute-org-refs' for @org: replacement.
 Uses `duckdb-query--substitute-var-refs' for @var: and @expr: replacement."
   (let* ((executor (duckdb-query--resolve-executor executor))
          (temp-files (make-hash-table :test 'eq))
+         ;; Step 0: Substitute @sql: references (before all others)
+         (sql-resolved-query (if sql
+                                 (duckdb-query--substitute-sql-refs query sql)
+                               query))
          ;; Step 1: Resolve @org: references
-         (org-resolved-query (duckdb-query--substitute-org-refs query temp-files))
+         (org-resolved-query (duckdb-query--substitute-org-refs
+                              sql-resolved-query temp-files))
          ;; Step 2: Substitute @data: and @ references
          (data-resolved-query (if data
                                   (duckdb-query--substitute-data-refs
@@ -2304,7 +2374,8 @@ Uses `duckdb-query--substitute-var-refs' for @var: and @expr: replacement."
                        (concat var-setup-sql effective-query)))
          (db (or database duckdb-query-default-database))
          (clean-args (cl-loop for (k v) on args by #'cddr
-                              unless (memq k '(:data :data-format :var :expr :preserve-nested))
+                              unless (memq k '(:data :data-format :var :expr
+                                               :sql :preserve-nested))
                               append (list k v)))
          (output nil))
     (unwind-protect
