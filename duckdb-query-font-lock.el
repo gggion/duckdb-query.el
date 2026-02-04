@@ -227,10 +227,18 @@ PRESET is a symbol from `duckdb-query-font-lock-presets'."
   "`duckdb-query' Functions whose first string argument is a SQL query.")
 
 (defconst duckdb-query-font-lock--reference-regexp
-  "\\(@\\(?:org\\|data\\|var\\|expr\\):\\)\\([a-zA-Z_][a-zA-Z0-9_:/-]*\\)"
+  (rx (group "@" (or "org" "data" "var" "expr" "sql") ":")
+      (group (any "a-zA-Z_") (* (any "a-zA-Z0-9_:/-"))))
   "Regexp matching @type:name references.
 Group 1: @type: prefix.
-Group 2: name.")
+Group 2: name.
+
+Reference types:
+- org:  Org table references via `org-babel-ref-resolve'
+- data: Elisp data bindings from :data parameter
+- var:  SQL variable literals from :var parameter
+- expr: SQL expressions from :var parameter
+- sql:  SQL string fragments for query construction")
 
 (defun duckdb-query-font-lock--in-quoted-context-p ()
   "Return non-nil if point is inside a quoted form."
