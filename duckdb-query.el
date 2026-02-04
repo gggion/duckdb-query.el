@@ -2024,31 +2024,24 @@ result))
 
 ;;;;; Variable Reference Substitution
 
-(defun duckdb-query--substitute-var-refs (query val-bindings)
+(defun duckdb-query--substitute-var-refs (query val-bindings data-bindings data-format temp-files)
   "Replace @val:NAME references in QUERY with getvariable() calls.
 
 QUERY is SQL string potentially containing @val:NAME references.
 VAL-BINDINGS is alist of (name . value) pairs for @val: references.
+DATA-BINDINGS is the :data parameter for resolving @data: in (sql ...) values.
+DATA-FORMAT is :json or :csv for data serialization.
+TEMP-FILES is hash table mapping symbols to temp file paths for cleanup.
+
 Bindings are processed in order like `let*', so later bindings can
 reference earlier ones via @val:name syntax in (sql ...) wrapped values.
+Additionally, (sql ...) values can reference @data:name bindings.
 
 Returns (SUBSTITUTED-QUERY . VAR-SETUP-SQL) where:
   SUBSTITUTED-QUERY has references replaced with getvariable('NAME')
   VAR-SETUP-SQL is SQL statements to SET VARIABLE for each binding
 
-Signals error if @val:NAME appears but NAME is not in VAL-BINDINGS.
-
-Example:
-  (duckdb-query--substitute-var-refs
-   \"SELECT @val:x3 AS result\"
-   \\='((x1 . 10)
-     (x2 . (sql \"(SELECT @val:x1 * 2)\"))
-     (x3 . (sql \"(SELECT @val:x2 + 5)\"))))
-  => (\"SELECT getvariable('x3') AS result\"
-      . \"SET VARIABLE x1 = 10;
-SET VARIABLE x2 = (SELECT getvariable('x1') * 2);
-SET VARIABLE x3 = (SELECT getvariable('x2') + 5);
-\")"
+Signals error if @val:NAME appears but NAME is not in VAL-BINDINGS."
   (let ((result query)
         (setup-sql "")
         (defined-vars nil)
@@ -2059,15 +2052,21 @@ SET VARIABLE x3 = (SELECT getvariable('x2') + 5);
       (let* ((sym (car binding))
              (name (symbol-name sym))
              (raw-value (cdr binding))
-             ;; Check if this is a (sql ...) expression that may contain @val: refs
+             ;; Check if this is a (sql ...) expression
              (is-sql-expr (and (consp raw-value)
                                (eq (car raw-value) 'sql)
                                (consp (cdr raw-value))
-                               (stringp (cadr raw-value))))
-             ;; Substitute @val: refs in sql expressions
+                               (stringp (cadr raw-value))
+                               (null (cddr raw-value))))
+             ;; Process (sql ...) expressions
              (processed-value
               (if is-sql-expr
                   (let ((v (cadr raw-value)))
+                    ;; First substitute @data: references in the sql expression
+                    (when data-bindings
+                      (setq v (duckdb-query--substitute-data-refs
+                               v data-bindings data-format temp-files)))
+                    ;; Then substitute @val: references to earlier bindings
                     (while (string-match val-ref-pattern v)
                       (let ((ref-name (match-string 1 v)))
                         (unless (member (intern ref-name) defined-vars)
@@ -2332,7 +2331,10 @@ Uses `duckdb-query--substitute-var-refs' for @val: replacement."
          (val-result (if val
                          (duckdb-query--substitute-var-refs
                           data-resolved-query
-                          val)
+                          val
+                          data          ; pass data bindings
+                          data-format   ; pass data format
+                          temp-files)   ; pass temp-files for @data: resolution
                        (cons data-resolved-query "")))
          (substituted-query (car val-result))
          (val-setup-sql (cdr val-result))
