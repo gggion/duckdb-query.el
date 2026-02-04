@@ -1667,6 +1667,7 @@ Called by `duckdb-query'."
 Handles:
   integer, float    → numeric literal
   string            → quoted string with escaped quotes
+  (sql string)      → unquoted SQL expression
   t                 → TRUE
   :false            → FALSE
   :null, nil        → NULL
@@ -1674,16 +1675,27 @@ Handles:
   alist             → SQL struct {\\='k1\\=': v1, ...}
   list              → SQL list [v1, v2, ...]
 
+Strings are quoted by default.  Use (sql string) to pass raw SQL
+expressions that DuckDB should evaluate.
+
 Examples:
-  42                  → \"42\"
-  3.14                → \"3.14\"
-  \"O\\='Brien\"         → \"\\='O\\='\\='Brien\\='\"
-  t                   → \"TRUE\"
-  :false              → \"FALSE\"
-  [1 2 3]             → \"[1, 2, 3]\"
-  ((a . 1) (b . 2))   → \"{\\='a\\=': 1, \\='b\\=': 2}\"
-  (1 2 3)             → \"[1, 2, 3]\""
+  42                      → \"42\"
+  3.14                    → \"3.14\"
+  \"O\\='Brien\"          → \"\\='O\\='\\='Brien\\='\"
+  (sql \"(SELECT 1)\")    → \"(SELECT 1)\"
+  t                       → \"TRUE\"
+  :false                  → \"FALSE\"
+  [1 2 3]                 → \"[1, 2, 3]\"
+  [\"a\" \"b\"]           → \"[\\='a\\=', \\='b\\=']\"
+  ((a . 1) (b . \"x\"))   → \"{\\='a\\=': 1, \\='b\\=': \\='x\\='}\""
   (cond
+   ;; SQL expression passthrough - (sql string)
+   ((and (consp value)
+         (eq (car value) 'sql)
+         (consp (cdr value))
+         (stringp (cadr value))
+         (null (cddr value)))
+    (cadr value))
    ;; NULL
    ((or (null value) (eq value :null))
     "NULL")
@@ -1705,7 +1717,7 @@ Examples:
    ((vectorp value)
     (format "[%s]"
             (mapconcat #'duckdb-query--value-to-sql-literal value ", ")))
-   ;; Alist - SQL struct
+   ;; Alist - SQL struct (check before general list)
    ((and (listp value)
          (consp (car value))
          (symbolp (caar value)))
@@ -2017,6 +2029,8 @@ result))
 
 QUERY is SQL string potentially containing @val:NAME references.
 VAL-BINDINGS is alist of (name . value) pairs for @val: references.
+Bindings are processed in order like `let*', so later bindings can
+reference earlier ones via @val:name syntax in (sql ...) wrapped values.
 
 Returns (SUBSTITUTED-QUERY . VAR-SETUP-SQL) where:
   SUBSTITUTED-QUERY has references replaced with getvariable('NAME')
@@ -2026,37 +2040,62 @@ Signals error if @val:NAME appears but NAME is not in VAL-BINDINGS.
 
 Example:
   (duckdb-query--substitute-var-refs
-   \"SELECT * FROM t WHERE x > @val:threshold\"
-   \\='((threshold . 100)))
-  => (\"SELECT * FROM t WHERE x > getvariable('threshold')\"
-      . \"SET VARIABLE threshold = 100;\\n\")"
+   \"SELECT @val:x3 AS result\"
+   \\='((x1 . 10)
+     (x2 . (sql \"(SELECT @val:x1 * 2)\"))
+     (x3 . (sql \"(SELECT @val:x2 + 5)\"))))
+  => (\"SELECT getvariable('x3') AS result\"
+      . \"SET VARIABLE x1 = 10;
+SET VARIABLE x2 = (SELECT getvariable('x1') * 2);
+SET VARIABLE x3 = (SELECT getvariable('x2') + 5);
+\")"
   (let ((result query)
         (setup-sql "")
-        (val-refs nil)
+        (defined-vars nil)
         (val-ref-pattern "@val:\\([a-zA-Z_][a-zA-Z0-9_]*\\)"))
 
-    ;; Collect all @val: references
-    (let ((temp-result result))
-      (while (string-match val-ref-pattern temp-result)
-        (let ((var-name (match-string 1 temp-result)))
-          (push (intern var-name) val-refs)
-          (setq temp-result (substring temp-result (match-end 0)))))
-      (setq result (replace-regexp-in-string
-                    val-ref-pattern
-                    "getvariable('\\1')"
-                    result t)))
+    ;; Process bindings in order (let* semantics)
+    (dolist (binding val-bindings)
+      (let* ((sym (car binding))
+             (name (symbol-name sym))
+             (raw-value (cdr binding))
+             ;; Check if this is a (sql ...) expression that may contain @val: refs
+             (is-sql-expr (and (consp raw-value)
+                               (eq (car raw-value) 'sql)
+                               (consp (cdr raw-value))
+                               (stringp (cadr raw-value))))
+             ;; Substitute @val: refs in sql expressions
+             (processed-value
+              (if is-sql-expr
+                  (let ((v (cadr raw-value)))
+                    (while (string-match val-ref-pattern v)
+                      (let ((ref-name (match-string 1 v)))
+                        (unless (member (intern ref-name) defined-vars)
+                          (error "@val:%s in value references undefined variable '%s'"
+                                 name ref-name))
+                        (setq v (replace-match
+                                 (format "getvariable('%s')" ref-name)
+                                 t t v))))
+                    (list 'sql v))
+                raw-value)))
+        ;; Add to setup SQL
+        (setq setup-sql
+              (concat setup-sql
+                      (format "SET VARIABLE %s = %s;\n"
+                              name
+                              (duckdb-query--value-to-sql-literal processed-value))))
+        ;; Track defined variable
+        (push sym defined-vars)))
 
-    ;; Validate and build SET VARIABLE for @val: references
-    (dolist (sym (delete-dups (nreverse val-refs)))
-      (let ((name (symbol-name sym)))
-        (if (not (assq sym val-bindings))
-            (error "@val:%s in query but '%s' not found in :val parameter" name name)
-          (let ((value (cdr (assq sym val-bindings))))
-            (setq setup-sql
-                  (concat setup-sql
-                          (format "SET VARIABLE %s = %s;\n"
-                                  name
-                                  (duckdb-query--value-to-sql-literal value))))))))
+    ;; Substitute @val: refs in main query
+    (while (string-match val-ref-pattern result)
+      (let ((ref-name (match-string 1 result)))
+        (unless (member (intern ref-name) defined-vars)
+          (error "@val:%s in query but '%s' not found in :val parameter"
+                 ref-name ref-name))
+        (setq result (replace-match
+                      (format "getvariable('%s')" ref-name)
+                      t t result))))
 
     (cons result setup-sql)))
 
