@@ -43,7 +43,7 @@
 ;; Highlighted reference types:
 ;; - @org:table-name - Org table references
 ;; - @data:name - Elisp data bindings
-;; - @var:name - SQL variable literals
+;; - @val:name - SQL variable literals
 ;; - @expr:name - SQL expression bindings
 
 ;;; Code:
@@ -227,7 +227,7 @@ PRESET is a symbol from `duckdb-query-font-lock-presets'."
   "`duckdb-query' Functions whose first string argument is a SQL query.")
 
 (defconst duckdb-query-font-lock--reference-regexp
-  (rx (group "@" (or "org" "data" "var" "expr" "sql") ":")
+  (rx (group "@" (or "org" "data" "val" "expr" "sql") ":")
       (group (any "a-zA-Z_") (* (any "a-zA-Z0-9_:/-"))))
   "Regexp matching @type:name references.
 Group 1: @type: prefix.
@@ -236,8 +236,8 @@ Group 2: name.
 Reference types:
 - org:  Org table references via `org-babel-ref-resolve'
 - data: Elisp data bindings from :data parameter
-- var:  SQL variable literals from :var parameter
-- expr: SQL expressions from :var parameter
+- val:  SQL variable literals from :val parameter
+- expr: SQL expressions from :expr parameter
 - sql:  SQL string fragments for query construction")
 
 (defun duckdb-query-font-lock--in-quoted-context-p ()
@@ -303,7 +303,7 @@ Reference types:
 (define-minor-mode duckdb-query-font-lock-mode
   "Minor mode for highlighting @type:name references in duckdb-query strings.
 
-When enabled, references like @org:table, @data:name, @var:value,
+When enabled, references like @org:table, @data:name, @val:value,
 and @expr:query are highlighted within SQL string arguments to
 `duckdb-query' and related functions.
 
