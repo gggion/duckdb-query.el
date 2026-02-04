@@ -44,7 +44,6 @@
 ;; - @org:table-name - Org table references
 ;; - @data:name - Elisp data bindings
 ;; - @val:name - SQL variable literals
-;; - @expr:name - SQL expression bindings
 
 ;;; Code:
 
@@ -227,7 +226,7 @@ PRESET is a symbol from `duckdb-query-font-lock-presets'."
   "`duckdb-query' Functions whose first string argument is a SQL query.")
 
 (defconst duckdb-query-font-lock--reference-regexp
-  (rx (group "@" (or "org" "data" "val" "expr" "sql") ":")
+  (rx (group "@" (or "org" "data" "val" "sql") ":")
       (group (any "a-zA-Z_") (* (any "a-zA-Z0-9_:/-"))))
   "Regexp matching @type:name references.
 Group 1: @type: prefix.
@@ -237,7 +236,6 @@ Reference types:
 - org:  Org table references via `org-babel-ref-resolve'
 - data: Elisp data bindings from :data parameter
 - val:  SQL variable literals from :val parameter
-- expr: SQL expressions from :expr parameter
 - sql:  SQL string fragments for query construction")
 
 (defun duckdb-query-font-lock--in-quoted-context-p ()

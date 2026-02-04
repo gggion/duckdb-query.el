@@ -1672,7 +1672,7 @@ Handles:
   :null, nil        → NULL
   vector            → SQL list [v1, v2, ...]
   alist             → SQL struct {\\='k1\\=': v1, ...}
-  (:expr . string)  → unquoted expression (for query assignment)
+  list              → SQL list [v1, v2, ...]
 
 Examples:
   42                  → \"42\"
@@ -1682,12 +1682,8 @@ Examples:
   :false              → \"FALSE\"
   [1 2 3]             → \"[1, 2, 3]\"
   ((a . 1) (b . 2))   → \"{\\='a\\=': 1, \\='b\\=': 2}\"
-  (:expr . \"...\")   → \"...\""
+  (1 2 3)             → \"[1, 2, 3]\""
   (cond
-   ;; Expression passthrough (for query assignment)
-   ((and (consp value)
-         (eq (car value) :expr))
-    (cdr value))
    ;; NULL
    ((or (null value) (eq value :null))
     "NULL")
@@ -1728,6 +1724,7 @@ Examples:
    ;; Fallback
    (t
     (error "Cannot convert %S to SQL literal" value))))
+
 ;;;; Nested Type Preservation
 (defun duckdb-query--nested-type-p (type-string)
   "Return non-nil if TYPE-STRING represents a nested DuckDB type.
@@ -2015,39 +2012,28 @@ result))
 
 ;;;;; Variable Reference Substitution
 
-(defun duckdb-query--substitute-var-refs (query val-bindings expr-bindings)
-  "Replace @val:NAME and @expr:NAME references in QUERY.
+(defun duckdb-query--substitute-var-refs (query val-bindings)
+  "Replace @val:NAME references in QUERY with getvariable() calls.
 
-QUERY is SQL string potentially containing references:
-  @val:NAME  - Literal value from VAL-BINDINGS, quoted appropriately
-  @expr:NAME - SQL expression from EXPR-BINDINGS, passed through unquoted
-
+QUERY is SQL string potentially containing @val:NAME references.
 VAL-BINDINGS is alist of (name . value) pairs for @val: references.
-EXPR-BINDINGS is alist of (name . sql-string) pairs for @expr: references.
 
 Returns (SUBSTITUTED-QUERY . VAR-SETUP-SQL) where:
   SUBSTITUTED-QUERY has references replaced with getvariable('NAME')
   VAR-SETUP-SQL is SQL statements to SET VARIABLE for each binding
 
-Signals error if:
-  - @val:NAME appears but NAME is not in VAL-BINDINGS
-  - @expr:NAME appears but NAME is not in EXPR-BINDINGS
-  - @val:NAME appears but NAME is in EXPR-BINDINGS (wrong parameter)
-  - @expr:NAME appears but NAME is in VAL-BINDINGS (wrong parameter)
+Signals error if @val:NAME appears but NAME is not in VAL-BINDINGS.
 
 Example:
   (duckdb-query--substitute-var-refs
-   \"SELECT @val:x, @expr:y\"
-   \\='((x . 100))
-   \\='((y . \"(SELECT 1 + 1)\")))
-  => (\"SELECT getvariable('x'), getvariable('y')\"
-      . \"SET VARIABLE x = 100;\\nSET VARIABLE y = (SELECT 1 + 1);\\n\")"
+   \"SELECT * FROM t WHERE x > @val:threshold\"
+   \\='((threshold . 100)))
+  => (\"SELECT * FROM t WHERE x > getvariable('threshold')\"
+      . \"SET VARIABLE threshold = 100;\\n\")"
   (let ((result query)
         (setup-sql "")
         (val-refs nil)
-        (expr-refs nil)
-        (val-ref-pattern "@val:\\([a-zA-Z_][a-zA-Z0-9_]*\\)")
-        (expr-ref-pattern "@expr:\\([a-zA-Z_][a-zA-Z0-9_]*\\)"))
+        (val-ref-pattern "@val:\\([a-zA-Z_][a-zA-Z0-9_]*\\)"))
 
     ;; Collect all @val: references
     (let ((temp-result result))
@@ -2060,63 +2046,30 @@ Example:
                     "getvariable('\\1')"
                     result t)))
 
-    ;; Collect all @expr: references
-    (let ((temp-result result))
-      (while (string-match expr-ref-pattern temp-result)
-        (let ((var-name (match-string 1 temp-result)))
-          (push (intern var-name) expr-refs)
-          (setq temp-result (substring temp-result (match-end 0)))))
-      (setq result (replace-regexp-in-string
-                    expr-ref-pattern
-                    "getvariable('\\1')"
-                    result t)))
-
     ;; Validate and build SET VARIABLE for @val: references
-    (dolist (sym (nreverse val-refs))
+    (dolist (sym (delete-dups (nreverse val-refs)))
       (let ((name (symbol-name sym)))
-        (cond
-         ((assq sym expr-bindings)
-          (error "@val:%s in query but '%s' is in :expr parameter (use @expr:%s or move to :val)"
-                 name name name))
-         ((not (assq sym val-bindings))
-          (error "@val:%s in query but '%s' not found in :val parameter" name name))
-         (t
+        (if (not (assq sym val-bindings))
+            (error "@val:%s in query but '%s' not found in :val parameter" name name)
           (let ((value (cdr (assq sym val-bindings))))
             (setq setup-sql
                   (concat setup-sql
                           (format "SET VARIABLE %s = %s;\n"
                                   name
-                                  (duckdb-query--value-to-sql-literal value)))))))))
-
-    ;; Validate and build SET VARIABLE for @expr: references
-    (dolist (sym (nreverse expr-refs))
-      (let ((name (symbol-name sym)))
-        (cond
-         ((assq sym val-bindings)
-          (error "@expr:%s in query but '%s' is in :val parameter (use @val:%s or move to :expr)"
-                 name name name))
-         ((not (assq sym expr-bindings))
-          (error "@expr:%s in query but '%s' not found in :expr parameter" name name))
-         (t
-          (let ((value (cdr (assq sym expr-bindings))))
-            (setq setup-sql
-                  (concat setup-sql
-                          (format "SET VARIABLE %s = %s;\n" name value))))))))
+                                  (duckdb-query--value-to-sql-literal value))))))))
 
     (cons result setup-sql)))
 
-(defun duckdb-query--var-reset-sql (val-bindings expr-bindings)
-  "Generate RESET VARIABLE statements for VAL-BINDINGS and EXPR-BINDINGS.
+(defun duckdb-query--var-reset-sql (val-bindings)
+  "Generate RESET VARIABLE statements for VAL-BINDINGS.
 
 Returns SQL string with RESET VARIABLE for each binding.
 Used in cleanup to avoid polluting session state."
-  (let ((all-names (append (mapcar #'car val-bindings)
-                           (mapcar #'car expr-bindings))))
-    (mapconcat
-     (lambda (sym)
-       (format "RESET VARIABLE %s;" (symbol-name sym)))
-     all-names
-     "\n")))
+  (mapconcat
+   (lambda (binding)
+     (format "RESET VARIABLE %s;" (symbol-name (car binding))))
+   val-bindings
+   "\n"))
 
 (defun duckdb-query--substitute-sql-refs (query sql-bindings)
   "Replace @sql:NAME references in QUERY with SQL fragments.
@@ -2173,7 +2126,6 @@ Called by =duckdb-query' before other reference substitutions."
                               data
                               (data-format :json)
                               val
-                              expr
                               sql
                               preserve-nested
                               &allow-other-keys)
@@ -2185,7 +2137,6 @@ QUERY is SQL string with optional inline references:
   @org:file:name    Org table from FILE
   @data:name        Elisp data from DATA parameter
   @val:name         Literal value from VAL parameter
-  @expr:name        SQL expression from EXPR parameter
   @sql:name         Query fragment from SQL parameter
 
 DATA binds Elisp data structures to @data: references:
@@ -2206,34 +2157,23 @@ VAL binds literal values to @val:NAME references:
   Values are converted to SQL literals with proper quoting.
   Safe for user input - strings are escaped automatically.
 
-EXPR binds SQL expressions to @expr:NAME references:
-
-  :expr \\='((threshold . \"(SELECT AVG(score) FROM scores)\")
-          (ids . \"(SELECT list(id) FROM active_users)\"))
-
-  Values are passed through as raw SQL and executed.
-  Use for subqueries, aggregations, and computed values.
-
 SQL binds query fragments to @sql:NAME references:
 
-  :sql \\='((active_users . \"SELECT * FROM users WHERE status = \\='active\\='\")
-        (recent_orders . \"SELECT * FROM orders WHERE date > CURRENT_DATE - 30\"))
+  :sql \\='((base . \"SELECT * FROM users WHERE status = \\='active\\='\")
+        (cols . \"id, name, email\")
+        (threshold . \"(SELECT AVG(score) FROM scores)\"))
 
-  Fragments are substituted as parenthesized subqueries before other
-  reference types are processed.  This enables query composition without
-  string interpolation.
+  Fragments are substituted as text before other reference types
+  are processed.  Use for table names, column lists, subqueries,
+  and any SQL syntax that cannot be a literal value.
 
-  Unlike :val (which quotes values safely) and :expr (which evaluates
-  expressions), :sql performs direct text substitution.
+  Unlike :val (which quotes values safely), :sql performs direct
+  text substitution.  Only use with trusted input.
 
 The reference type in QUERY must match the parameter:
   - @val:x requires x to be in :val
-  - @expr:x requires x to be in :expr
   - @sql:x requires x to be in :sql
   Mismatches signal an error with a helpful message.
-
-Important: @expr: expressions execute BEFORE the main query.
-They cannot reference CTEs defined in the same query.
 
 DATABASE is optional database file path.  When nil, uses
 `duckdb-query-default-database' if set, otherwise in-memory database.
@@ -2317,10 +2257,6 @@ Examples:
   (duckdb-query \"SELECT * FROM users WHERE age >= @val:min_age\"
                 :val \\='((min_age . 18)))
 
-  ;; Expression binding for computed values
-  (duckdb-query \"SELECT * FROM scores WHERE val > @expr:avg\"
-                :expr \\='((avg . \"(SELECT AVG(val) FROM scores)\")))
-
   ;; SQL fragment composition
   (duckdb-query \"SELECT * FROM (@sql:base) WHERE active\"
                 :sql \\='((base . \"SELECT * FROM users\")))
@@ -2328,17 +2264,17 @@ Examples:
   ;; Combined bindings
   (duckdb-query
    \"SELECT * FROM (@sql:filtered)
-    WHERE score > @expr:threshold
+    WHERE score > @sql:threshold
       AND name LIKE @val:pattern\"
-   :sql \\='((filtered . \"SELECT * FROM users WHERE status = \\='active\\='\"))
-   :expr \\='((threshold . \"(SELECT AVG(score) FROM users)\"))
-   :val \\='((pattern . \"%smith%\")))
+   :val \\='((pattern . \"%smith%\"))
+   :sql \\='((filtered . \"SELECT * FROM users WHERE status = \\='active\\='\")
+             (threshold . \"(SELECT AVG(score) FROM users)\")))
 
 Uses `duckdb-query-execute' for execution dispatch.
 Uses `duckdb-query--substitute-sql-refs' for @sql: replacement.
 Uses `duckdb-query--substitute-data-refs' for @data: replacement.
 Uses `duckdb-query--substitute-org-refs' for @org: replacement.
-Uses `duckdb-query--substitute-var-refs' for @val: and @expr: replacement."
+Uses `duckdb-query--substitute-var-refs' for @val: replacement."
   (let* ((executor (duckdb-query--resolve-executor executor))
          (temp-files (make-hash-table :test 'eq))
          ;; Step 0: Substitute @sql: references (before all others)
@@ -2353,12 +2289,11 @@ Uses `duckdb-query--substitute-var-refs' for @val: and @expr: replacement."
                                   (duckdb-query--substitute-data-refs
                                    org-resolved-query data data-format temp-files)
                                 org-resolved-query))
-         ;; Step 3: Substitute @val: and @expr: references
-         (val-result (if (or val expr)
+         ;; Step 3: Substitute @val: references
+         (val-result (if val
                          (duckdb-query--substitute-var-refs
                           data-resolved-query
-                          (or val '())
-                          (or expr '()))
+                          val)
                        (cons data-resolved-query "")))
          (substituted-query (car val-result))
          (val-setup-sql (cdr val-result))
@@ -2374,7 +2309,7 @@ Uses `duckdb-query--substitute-var-refs' for @val: and @expr: replacement."
                        (concat val-setup-sql effective-query)))
          (db (or database duckdb-query-default-database))
          (clean-args (cl-loop for (k v) on args by #'cddr
-                              unless (memq k '(:data :data-format :val :expr
+                              unless (memq k '(:data :data-format :val
                                                :sql :preserve-nested))
                               append (list k v)))
          (output nil))
@@ -2475,11 +2410,11 @@ Uses `duckdb-query--substitute-var-refs' for @val: and @expr: replacement."
                ;; DDL/DML success - non-JSON, non-error output
                (t nil)))))
       ;; Cleanup: reset variables in session mode
-      (when (and (or val expr) (eq executor :session))
+      (when (and val (eq executor :session))
         (ignore-errors
           (duckdb-query-session-execute
            duckdb-query--current-session
-           (duckdb-query--var-reset-sql (or val '()) (or expr '()))
+           (duckdb-query--var-reset-sql val)
            5)))
       ;; Cleanup temp files
       (maphash (lambda (_sym file)
