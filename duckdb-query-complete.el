@@ -191,6 +191,103 @@ Called by `duckdb-query-complete-at-point'."
 
 ;;;; Candidate Generation
 
+(defun duckdb-query-complete--extract-binding-definitions (val-beg val-end)
+  "Extract binding name-to-definition alist from parameter value.
+
+VAL-BEG and VAL-END delimit the parameter value region.
+
+Walk the alist structure, extracting each binding's name symbol
+and the text representation of its value (the cdr of each cons cell).
+
+Return alist of (NAME-STRING . DEFINITION-STRING) pairs.
+Return nil if the region does not contain a valid binding list.
+
+Handles quoted and backquoted forms.  Skips unquote markers
+(comma and comma-at).  Recognizes cons pairs by the dot separator
+after the car symbol.
+
+Example for :val \\='((min_price . 25) (avg_revenue . (sql \"...\"))):
+
+  ((\"min_price\" . \"25\")
+   (\"avg_revenue\" . \"(sql \\\"...\\\")\"))
+
+Called by `duckdb-query-complete--binding-definitions'.
+Uses the same structural walking strategy as
+`duckdb-query--extract-binding-names'."
+  (save-excursion
+    (goto-char val-beg)
+    (duckdb-query--skip-whitespace-and-comments)
+    ;; Skip quote or backquote
+    (when (memq (char-after) (list duckdb-query--char-quote
+                                   duckdb-query--char-backquote))
+      (forward-char 1))
+    (let (definitions)
+      (when (eq (char-after) duckdb-query--char-lparen)
+        (let ((list-end (save-excursion
+                          (when (duckdb-query--forward-sexp-safe)
+                            (1- (point))))))
+          (when (and list-end (< list-end val-end))
+            (forward-char 1) ;; enter outer list
+            (while (< (point) list-end)
+              (duckdb-query--skip-whitespace-and-comments)
+              ;; Skip unquote markers
+              (when (eq (char-after) duckdb-query--char-comma)
+                (forward-char 1)
+                (when (eq (char-after) duckdb-query--char-at)
+                  (forward-char 1)))
+              (duckdb-query--skip-whitespace-and-comments)
+              (when (and (< (point) list-end)
+                         (eq (char-after) duckdb-query--char-lparen))
+                (let ((pair-start (point)))
+                  (forward-char 1) ;; enter cons cell
+                  (duckdb-query--skip-whitespace-and-comments)
+                  (when (looking-at "\\([a-zA-Z_][a-zA-Z0-9_-]*\\)")
+                    (let ((name (match-string-no-properties 1)))
+                      (goto-char (match-end 0))
+                      (duckdb-query--skip-whitespace-and-comments)
+                      (when (eq (char-after) duckdb-query--char-dot)
+                        (forward-char 1) ;; skip dot
+                        (duckdb-query--skip-whitespace-and-comments)
+                        ;; Skip unquote marker before value
+                        (when (eq (char-after) duckdb-query--char-comma)
+                          (forward-char 1)
+                          (when (eq (char-after) duckdb-query--char-at)
+                            (forward-char 1)))
+                        (duckdb-query--skip-whitespace-and-comments)
+                        (let ((val-start (point)))
+                          (when (duckdb-query--forward-sexp-safe)
+                            (let ((val-text
+                                   (string-trim
+                                    (buffer-substring-no-properties
+                                     val-start (point)))))
+                              (push (cons name val-text)
+                                    definitions)))))))
+                  (goto-char pair-start)))
+              (unless (duckdb-query--forward-sexp-safe)
+                (forward-char 1))))))
+      (nreverse definitions))))
+
+(defun duckdb-query-complete--binding-definitions (parse-result type-str)
+  "Return alist of (NAME . DEFINITION) for TYPE-STR from PARSE-RESULT.
+
+PARSE-RESULT is a `duckdb-query-parse-result' struct.
+TYPE-STR is one of \"sql\", \"data\", \"val\".
+
+Return alist of (NAME-STRING . DEFINITION-STRING) pairs, or nil
+if no bindings exist for that type.
+
+Uses `duckdb-query-complete--extract-binding-definitions' to walk
+the parameter value region.
+
+Called by `duckdb-query-complete-at-point' for affixation."
+  (let ((keyword (intern (format ":%s" type-str))))
+    (cl-some (lambda (param)
+               (when (eq (plist-get param :key) keyword)
+                 (duckdb-query-complete--extract-binding-definitions
+                  (plist-get param :val-beg)
+                  (plist-get param :val-end))))
+             (duckdb-query-parse-result-params parse-result))))
+
 (defun duckdb-query-complete--binding-candidates (parse-result type-str)
   "Return binding name strings for TYPE-STR from PARSE-RESULT.
 
@@ -212,16 +309,28 @@ Uses `duckdb-query-parse-result-bindings' for data access."
 
 ;;;; Annotation Functions
 
-(defun duckdb-query-complete--name-annotation (type-str)
-  "Return annotation function for binding name candidates.
+(defun duckdb-query-complete--name-affixation (type-str definitions)
+  "Return affixation function for binding name candidates.
 
-TYPE-STR is the reference type string (\"sql\", \"data\", \"val\").
+TYPE-STR is the reference type (\"sql\", \"data\", \"val\").
+DEFINITIONS is alist of (NAME . DEFINITION-TEXT) pairs.
 
-Return function suitable for :annotation-function property.
+Return function suitable for :affixation-function property.
+Each candidate is displayed as:
+
+  candidate-name  definition-text  @type
 
 Called by `duckdb-query-complete-at-point'."
-  (let ((suffix (format " @%s" type-str)))
-    (lambda (_candidate) suffix)))
+  (let ((type-suffix (format " @%s" type-str)))
+    (lambda (candidates)
+      (mapcar (lambda (cand)
+                (let ((def (or (cdr (assoc cand definitions)) "")))
+                  ;; Truncate long definitions
+                  (when (> (length def) 60)
+                    (setq def (concat (substring def 0 57) "...")))
+                  (list cand "" (propertize (format " %s %s" def type-suffix)
+                                            'face 'completions-annotations))))
+              candidates))))
 
 (defun duckdb-query-complete--type-annotation (candidate)
   "Return annotation for type CANDIDATE.
@@ -267,6 +376,10 @@ regardless of `corfu-auto-prefix' threshold.  Without this,
 corfu ignores our candidates when the completion region (text
 after the colon) is shorter than `corfu-auto-prefix'.
 
+Name candidates display binding definitions via
+:affixation-function.  Each candidate shows the value expression
+from the corresponding parameter binding.
+
 When this function returns nil (not in a completable context),
 other capf functions run normally.
 
@@ -278,7 +391,8 @@ Install via `duckdb-query-complete-mode' or manually:
 Uses `duckdb-query-complete--ref-context-at-point' for trigger detection.
 Uses `duckdb-query--parse-at-point' for structural analysis.
 Uses `duckdb-query-complete--in-completable-string-p' for boundary check.
-Uses `duckdb-query-complete--binding-candidates' for candidate extraction."
+Uses `duckdb-query-complete--binding-candidates' for candidate extraction.
+Uses `duckdb-query-complete--binding-definitions' for value display."
   ;; Fast rejection: must be inside a string
   (when (nth 3 (syntax-ppss))
     ;; Must be inside a duckdb-query family form
@@ -296,12 +410,15 @@ Uses `duckdb-query-complete--binding-candidates' for candidate extraction."
                (let ((candidates (duckdb-query-complete--binding-candidates
                                   parse-result type-str)))
                  (when candidates
-                   (list name-start (point) candidates
-                         :exclusive t
-                         :company-prefix-length t
-                         :annotation-function
-                         (duckdb-query-complete--name-annotation
-                          type-str)))))))
+                   (let ((definitions
+                          (duckdb-query-complete--binding-definitions
+                           parse-result type-str)))
+                     (list name-start (point) candidates
+                           :exclusive t
+                           :company-prefix-length t
+                           :affixation-function
+                           (duckdb-query-complete--name-affixation
+                            type-str definitions))))))))
           ;; Context 2: @type-prefix -- complete type names
           (:type-prefix
            (let ((type-start (plist-get ref-ctx :type-start))
