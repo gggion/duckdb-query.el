@@ -76,6 +76,24 @@
 (defconst duckdb-query--char-semicolon ?\;
   "Semicolon character, used as comment prefix.")
 
+;;;; Function Match Constant
+
+(defconst duckdb-query--query-function-regexp
+  (rx "(" (group "duckdb-query" (opt "-" (or "value" "row" "column"))) symbol-end)
+  "Regexp matching `duckdb-query' family function calls.
+
+Matches `duckdb-query', `duckdb-query-value', `duckdb-query-row',
+and `duckdb-query-column'.  All share the same argument structure:
+SQL string as first argument, keyword parameters for bindings.
+
+Group 1 captures the function name.
+
+Used by `duckdb-query--find-enclosing-form'.
+Used by `duckdb-query-parse-buffer'.
+Used by `duckdb-query-font-lock--find-form-start'.
+Used by `duckdb-query-font-lock--propertize'.")
+
+
 ;;;; Core Position Utilities
 
 (defsubst duckdb-query--in-string-p ()
@@ -124,24 +142,23 @@ Return new position on success, nil on scan error."
 ;;;; Form Location
 
 (defun duckdb-query--find-enclosing-form ()
-  "Find enclosing `duckdb-query' form containing point.
+  "Find enclosing `duckdb-query' family form containing point.
 Return (BEG . END) cons cell with form bounds, or nil if point
-is not inside a `duckdb-query' form.
+is not inside a recognized form.
 
-Checks if point is directly on a `duckdb-query' form first,
-then walks up the list structure checking each enclosing list."
+Matches functions listed in `duckdb-query--query-function-regexp'."
   (save-excursion
     (when-let ((str-start (duckdb-query--in-string-p)))
       (goto-char str-start))
     (catch 'found
-      ;; Check if directly on a duckdb-query form
-      (when (looking-at "(duckdb-query\\_>")
+      ;; Check if directly on a form
+      (when (looking-at duckdb-query--query-function-regexp)
         (let ((beg (point)))
           (when (duckdb-query--forward-sexp-safe)
             (throw 'found (cons beg (point))))))
       ;; Walk up list structure
       (while (duckdb-query--backward-up-list-safe)
-        (when (looking-at "(duckdb-query\\_>")
+        (when (looking-at duckdb-query--query-function-regexp)
           (let ((beg (point)))
             (when (duckdb-query--forward-sexp-safe)
               (throw 'found (cons beg (point)))))))
@@ -447,14 +464,14 @@ Return nil if all references are valid."
 ;;;; Buffer-Wide Parsing
 
 (defun duckdb-query-parse-buffer ()
-  "Parse all `duckdb-query' forms in current buffer.
+  "Parse all `duckdb-query' family forms in current buffer.
 Return list of `duckdb-query-parse-result' structs, one per form.
 
 Skip forms that appear inside strings or comments."
   (save-excursion
     (goto-char (point-min))
     (let (results)
-      (while (re-search-forward "(duckdb-query\\_>" nil t)
+      (while (re-search-forward duckdb-query--query-function-regexp nil t)
         (goto-char (match-beginning 0))
         (unless (duckdb-query--in-string-or-comment-p)
           (when-let ((result (duckdb-query--parse-at-point)))

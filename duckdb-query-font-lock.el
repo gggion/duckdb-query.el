@@ -55,6 +55,9 @@
 (defvar font-lock-beg)
 (defvar font-lock-end)
 
+;; Defined by duckdb-query-parse.el, used by find-form function.
+(defvar duckdb-query--query-function-regexp)
+
 (defgroup duckdb-query-font-lock nil
   "Font-lock support for `duckdb-query' SQL strings."
   :group 'duckdb-query
@@ -347,14 +350,15 @@ Called by `duckdb-query-font-lock--propertize'."
 ;;;;; Form Detection
 
 (defun duckdb-query-font-lock--find-form-start (pos)
-  "Find start of `duckdb-query' form containing POS.
+  "Find start of `duckdb-query' family form containing POS.
 
 Walk backward from POS through list structure looking for an
-enclosing `duckdb-query' call.  Handle the case where POS is
-inside a string by first moving to string start.
+enclosing call matching `duckdb-query--query-function-regexp'.
+Handle the case where POS is inside a string by first moving
+to string start.
 
 Return form start position, or nil if POS is not inside a
-`duckdb-query' form.
+recognized form.
 
 Called by `duckdb-query-font-lock--propertize'.
 Called by `duckdb-query-font-lock--extend-region'."
@@ -368,7 +372,7 @@ Called by `duckdb-query-font-lock--extend-region'."
                   (condition-case nil
                       (progn (backward-up-list 1) t)
                     (scan-error nil)))
-        (when (looking-at "(duckdb-query\\_>")
+        (when (looking-at duckdb-query--query-function-regexp)
           (setq found (point))))
       found)))
 
@@ -377,8 +381,8 @@ Called by `duckdb-query-font-lock--extend-region'."
 (defun duckdb-query-font-lock--propertize (end)
   "Fontify `duckdb-query' references between point and END.
 
-Search for `duckdb-query' forms in the region, parse each form,
-validate references, and apply faces.
+Search for `duckdb-query' family forms in the region, parse each
+form, validate references, and apply faces.
 
 When the region starts inside an existing form, find and fontify
 that form first before searching forward.
@@ -389,7 +393,7 @@ Uses `duckdb-query--parse-at-point' for structural parsing.
 Uses `duckdb-query-font-lock--fontify-form' for face application."
   (let ((start (point))
         (fontified-forms (make-hash-table :test 'eq)))
-    ;; Handle region starting inside a duckdb-query form
+    ;; Handle region starting inside a form
     (when-let ((form-start (duckdb-query-font-lock--find-form-start start)))
       (unless (gethash form-start fontified-forms)
         (save-excursion
@@ -402,7 +406,7 @@ Uses `duckdb-query-font-lock--fontify-form' for face application."
                               parse-result)))))))
     ;; Search forward for additional forms
     (goto-char start)
-    (while (re-search-forward "(duckdb-query\\_>" end t)
+    (while (re-search-forward duckdb-query--query-function-regexp end t)
       (let ((form-start (match-beginning 0)))
         (goto-char form-start)
         (unless (or (duckdb-query--in-string-or-comment-p)
