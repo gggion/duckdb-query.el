@@ -156,24 +156,38 @@ Also see `duckdb-query-complete--type-strings' for valid types."
 
 ;;;; Boundary Validation
 
-(defun duckdb-query-complete--in-sql-string-p (parse-result at-pos)
-  "Return non-nil if AT-POS is within the main SQL string.
+(defun duckdb-query-complete--in-completable-string-p (parse-result at-pos)
+  "Return non-nil if AT-POS is in a completable string context.
 
 PARSE-RESULT is a `duckdb-query-parse-result' struct.
 AT-POS is the buffer position of the @ character.
 
-Returns non-nil when AT-POS falls between the opening and closing
-quotes of the main SQL string argument.
+Completable contexts:
+- Main SQL string argument (between sql-beg and sql-end)
+- String literals inside :val, :sql, or :data parameter values
 
-Does not validate positions inside parameter value strings.
-Phase 1 restricts completion to the main SQL string only.
+Return non-nil when AT-POS falls within any of these regions.
+
+Provides broader context coverage.
 
 Called by `duckdb-query-complete-at-point'."
   (let ((sql-beg (duckdb-query-parse-result-sql-beg parse-result))
         (sql-end (duckdb-query-parse-result-sql-end parse-result)))
-    (and sql-beg sql-end
-         (> at-pos sql-beg)
-         (< at-pos sql-end))))
+    (or
+     ;; Main SQL string
+     (and sql-beg sql-end
+          (> at-pos sql-beg)
+          (< at-pos sql-end))
+     ;; Parameter value strings
+     (cl-some
+      (lambda (param)
+        (let ((key (plist-get param :key)))
+          (when (memq key '(:val :sql :data))
+            (let ((val-beg (plist-get param :val-beg))
+                  (val-end (plist-get param :val-end)))
+              (and (> at-pos val-beg)
+                   (< at-pos val-end))))))
+      (duckdb-query-parse-result-params parse-result)))))
 
 ;;;; Candidate Generation
 
@@ -234,10 +248,15 @@ Completion contexts:
   @type:partial-name  Complete binding names for that type.
   @partial-type       Complete reference type prefixes.
 
+Completable string positions:
+- Main SQL string argument to `duckdb-query' family functions
+- String literals inside :val, :sql, and :data parameter values
+
 Fast rejection path:
 1. Not inside a string -- return nil immediately.
 2. Not inside a `duckdb-query' family form -- return nil.
 3. Not at an @ reference trigger -- return nil.
+4. @ position not in a completable string -- return nil.
 
 Coexists with `elisp-completion-at-point' via :exclusive property
 set to \\='no, allowing fallback to other capf functions when this
@@ -250,6 +269,7 @@ Install via `duckdb-query-complete-mode' or manually:
 
 Uses `duckdb-query-complete--ref-context-at-point' for trigger detection.
 Uses `duckdb-query--parse-at-point' for structural analysis.
+Uses `duckdb-query-complete--in-completable-string-p' for boundary check.
 Uses `duckdb-query-complete--binding-candidates' for candidate extraction."
   ;; Fast rejection: must be inside a string
   (when (nth 3 (syntax-ppss))
@@ -263,7 +283,7 @@ Uses `duckdb-query-complete--binding-candidates' for candidate extraction."
            (let ((type-str (plist-get ref-ctx :type))
                  (name-start (plist-get ref-ctx :name-start))
                  (at-pos (plist-get ref-ctx :at-pos)))
-             (when (duckdb-query-complete--in-sql-string-p
+             (when (duckdb-query-complete--in-completable-string-p
                     parse-result at-pos)
                (let ((candidates (duckdb-query-complete--binding-candidates
                                   parse-result type-str)))
@@ -277,7 +297,7 @@ Uses `duckdb-query-complete--binding-candidates' for candidate extraction."
           (:type-prefix
            (let ((type-start (plist-get ref-ctx :type-start))
                  (at-pos (plist-get ref-ctx :at-pos)))
-             (when (duckdb-query-complete--in-sql-string-p
+             (when (duckdb-query-complete--in-completable-string-p
                     parse-result at-pos)
                (list type-start (point)
                      duckdb-query-complete--type-candidates
