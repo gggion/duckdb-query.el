@@ -48,6 +48,7 @@
 
 (require 'cl-lib)
 (require 'duckdb-query-parse)
+(require 'duckdb-query)
 
 ;;;; Customization
 
@@ -55,6 +56,62 @@
   "Completion support for `duckdb-query' SQL strings."
   :group 'duckdb-query
   :prefix "duckdb-query-complete-")
+
+(defcustom duckdb-query-complete-sql-p t
+  "Whether to offer SQL autocompletion via DuckDB.
+
+When non-nil, `duckdb-query-complete-at-point' queries DuckDB's
+`sql_auto_complete' function for SQL keyword, table, column, and
+function suggestions at non-reference positions in SQL strings.
+
+When nil, only @type:name reference completion is offered.
+
+Requires DuckDB CLI or active session.  Falls back gracefully
+on error, returning nil to allow other capf functions to run.
+
+Also see `duckdb-query-complete-at-point'."
+  :type 'boolean
+  :group 'duckdb-query-complete
+  :package-version '(duckdb-query . "0.8.0"))
+
+;;;; Internal Variables
+(defconst duckdb-query-complete--sql-annotation " 🦆"
+  "Annotation suffix for SQL autocompletion candidates.")
+
+;;;; Debugging Utilities
+(defvar duckdb-query-complete--debug t
+  "When non-nil, log completion events to *duckdb-complete-debug* buffer.")
+
+(defun duckdb-query-complete--debug-log (fmt &rest args)
+  "Log formatted message to debug buffer when debugging is active.
+
+FMT is a format string.  ARGS are format arguments.
+
+Only logs when `duckdb-query-complete--debug' is non-nil.
+Creates *duckdb-complete-debug* buffer on first use.
+
+Called by `duckdb-query-complete-at-point' and
+`duckdb-query-complete--sql-candidates'."
+  (when duckdb-query-complete--debug
+    (let ((buf (get-buffer-create "*duckdb-complete-debug*")))
+      (with-current-buffer buf
+        (goto-char (point-max))
+        (insert (format-time-string "[%H:%M:%S] ")
+                (apply #'format fmt args)
+                "\n")))))
+
+(defun duckdb-query-complete-toggle-debug ()
+  "Toggle completion debug logging.
+
+When enabled, all capf calls, SQL queries, errors, and candidate
+lists are logged to the *duckdb-complete-debug* buffer."
+  (interactive)
+  (setq duckdb-query-complete--debug (not duckdb-query-complete--debug))
+  (if duckdb-query-complete--debug
+      (progn
+        (get-buffer-create "*duckdb-complete-debug*")
+        (message "duckdb-query completion debug ON"))
+    (message "duckdb-query completion debug OFF")))
 
 ;;;; Reference Type Constants
 
@@ -188,6 +245,106 @@ Called by `duckdb-query-complete-at-point'."
               (and (> at-pos val-beg)
                    (< at-pos val-end))))))
       (duckdb-query-parse-result-params parse-result)))))
+
+;;;; SQL Autocompletion
+
+(defun duckdb-query-complete--sanitize-for-autocomplete (sql parse-result)
+  "Replace @type:name references in SQL with parseable substitutions.
+
+SQL is a partial query string extracted from a buffer.
+PARSE-RESULT is a `duckdb-query-parse-result' struct, used to
+read actual @sql: fragment definitions from the buffer.
+
+Return modified SQL string suitable for `sql_auto_complete'.
+
+For @sql: references, inline the actual SQL fragment text from
+the corresponding :sql parameter binding.  This gives
+`sql_auto_complete' the full query structure for context-aware
+suggestions.
+
+For other reference types, use syntactic placeholders:
+  @val:name   becomes  getvariable(\\='name\\=')
+  @data:name  becomes  __data_name
+  @org:name   becomes  __org_name
+  @name       becomes  __data_name  (shorthand form)
+
+Called by `duckdb-query-complete-at-point'.
+Uses `duckdb-query-complete--binding-definitions' for @sql: values."
+  (let ((result sql)
+        (sql-defs (when parse-result
+                    (duckdb-query-complete--binding-definitions
+                     parse-result "sql"))))
+    ;; Inline @sql: fragments with actual definitions
+    (when sql-defs
+      (dolist (def sql-defs)
+        (let* ((name (car def))
+               (value (cdr def))
+               ;; Strip surrounding quotes from the definition text
+               (clean-value (if (and (> (length value) 1)
+                                     (eq (aref value 0) ?\")
+                                     (eq (aref value (1- (length value))) ?\"))
+                                (substring value 1 -1)
+                              value))
+               (pattern (format "@sql:%s\\b" (regexp-quote name))))
+          (setq result (replace-regexp-in-string
+                        pattern clean-value result t t)))))
+    ;; Other reference types
+    (setq result (replace-regexp-in-string
+                  "@val:\\([a-zA-Z_][a-zA-Z0-9_]*\\)"
+                  "getvariable('\\1')"
+                  result t))
+    (setq result (replace-regexp-in-string
+                  "@data:\\([a-zA-Z_][a-zA-Z0-9_]*\\)"
+                  "__data_\\1"
+                  result t))
+    (setq result (replace-regexp-in-string
+                  "@org:\\([a-zA-Z_][a-zA-Z0-9_]*\\)"
+                  "__org_\\1"
+                  result t))
+    ;; Shorthand @name form last
+    (setq result (replace-regexp-in-string
+                  "@\\([a-zA-Z_][a-zA-Z0-9_]*\\)"
+                  "__data_\\1"
+                  result t))
+    result))
+
+(defun duckdb-query-complete--sql-candidates (sanitized-sql)
+  "Fetch SQL autocompletion candidates from DuckDB.
+
+SANITIZED-SQL is a query string with references already replaced
+by `duckdb-query-complete--sanitize-for-autocomplete'.
+
+Return list of alists with `suggestion' and `suggestion_start'
+keys, or nil on error.
+
+Uses `duckdb-query' with the current session executor if inside
+`duckdb-query-with-session', otherwise uses :cli executor with
+`duckdb-query-default-database' if set.
+
+Errors from DuckDB (malformed SQL, unavailable CLI) are caught,
+logged to the debug buffer, and return nil silently.
+
+Called by `duckdb-query-complete-at-point'.
+Also see `duckdb-query-complete-toggle-debug' for logging."
+  (duckdb-query-complete--debug-log "sql-candidates query:\n  %s"
+                                    sanitized-sql)
+  (condition-case err
+      (let ((results
+             (duckdb-query
+              "SELECT suggestion, suggestion_start FROM sql_auto_complete(@val:q)"
+              :val `((q . ,sanitized-sql))
+              :format :alist)))
+        (duckdb-query-complete--debug-log "sql-candidates results: %d rows"
+                                          (length results))
+        (duckdb-query-complete--debug-log "  candidates: %S"
+                                          (mapcar (lambda (r)
+                                                    (cdr (assq 'suggestion r)))
+                                                  results))
+        results)
+    (error
+     (duckdb-query-complete--debug-log "sql-candidates ERROR: %S" err)
+     nil)))
+
 
 ;;;; Candidate Generation
 
@@ -352,10 +509,11 @@ Called by `duckdb-query-complete-at-point'."
 Return nil when point is not in a completable context.
 Return (START END COLLECTION . PROPS) for active completion.
 
-Completion contexts:
+Completion contexts, checked in order:
 
   @type:partial-name  Complete binding names for that type.
   @partial-type       Complete reference type prefixes.
+  plain SQL text      Complete via `sql_auto_complete' (when enabled).
 
 Completable string positions:
 - Main SQL string argument to `duckdb-query' family functions
@@ -364,21 +522,41 @@ Completable string positions:
 Fast rejection path:
 1. Not inside a string -- return nil immediately.
 2. Not inside a `duckdb-query' family form -- return nil.
-3. Not at an @ reference trigger -- return nil.
+
+For reference contexts:
+3. At an @ reference trigger -- return binding candidates.
 4. @ position not in a completable string -- return nil.
+
+For SQL completion (when `duckdb-query-complete-sql-p' is non-nil):
+5. Extract partial SQL from string start to point.
+6. Sanitize references using parse result for @sql: inlining.
+7. Query DuckDB `sql_auto_complete' for suggestions.
+8. Map `suggestion_start' offset to buffer positions for START.
 
 Reference completion uses :exclusive t to prevent other capf
 functions (notably `cape-dabbrev') from providing conflicting
 candidates when inside a recognized @type:name context.
 
-Uses :company-prefix-length t to force corfu auto-completion
-regardless of `corfu-auto-prefix' threshold.  Without this,
-corfu ignores our candidates when the completion region (text
-after the colon) is shorter than `corfu-auto-prefix'.
+SQL completion uses :exclusive no to allow fallback when DuckDB
+returns no suggestions.
+
+Both branches use :company-prefix-length t to force corfu
+auto-completion regardless of `corfu-auto-prefix' threshold.
 
 Name candidates display binding definitions via
 :affixation-function.  Each candidate shows the value expression
 from the corresponding parameter binding.
+
+SQL candidates are annotated with a duck emoji to distinguish
+them from reference candidates and dabbrev suggestions.
+
+@sql: references are inlined with their actual fragment text
+before sending to `sql_auto_complete', giving DuckDB the full
+query structure for context-aware suggestions.
+
+When `duckdb-query-complete--debug' is non-nil, all capf calls,
+SQL queries, errors, and candidate lists are logged to the
+*duckdb-complete-debug* buffer.
 
 When this function returns nil (not in a completable context),
 other capf functions run normally.
@@ -392,45 +570,98 @@ Uses `duckdb-query-complete--ref-context-at-point' for trigger detection.
 Uses `duckdb-query--parse-at-point' for structural analysis.
 Uses `duckdb-query-complete--in-completable-string-p' for boundary check.
 Uses `duckdb-query-complete--binding-candidates' for candidate extraction.
-Uses `duckdb-query-complete--binding-definitions' for value display."
+Uses `duckdb-query-complete--binding-definitions' for value display.
+Uses `duckdb-query-complete--sanitize-for-autocomplete' for SQL cleanup.
+Uses `duckdb-query-complete--sql-candidates' for SQL autocompletion.
+Also see `duckdb-query-complete-toggle-debug' for debug logging."
+  (duckdb-query-complete--debug-log "capf called at point=%d" (point))
   ;; Fast rejection: must be inside a string
   (when (nth 3 (syntax-ppss))
     ;; Must be inside a duckdb-query family form
-    (when-let* ((parse-result (duckdb-query--parse-at-point))
-                (ref-ctx (duckdb-query-complete--ref-context-at-point)))
-      (let ((context (plist-get ref-ctx :context)))
-        (pcase context
-          ;; Context 1: @type:name -- complete binding names
-          (:type-name
-           (let ((type-str (plist-get ref-ctx :type))
-                 (name-start (plist-get ref-ctx :name-start))
-                 (at-pos (plist-get ref-ctx :at-pos)))
-             (when (duckdb-query-complete--in-completable-string-p
-                    parse-result at-pos)
-               (let ((candidates (duckdb-query-complete--binding-candidates
-                                  parse-result type-str)))
-                 (when candidates
-                   (let ((definitions
-                          (duckdb-query-complete--binding-definitions
-                           parse-result type-str)))
-                     (list name-start (point) candidates
+    (when-let* ((parse-result (duckdb-query--parse-at-point)))
+      (let ((ref-ctx (duckdb-query-complete--ref-context-at-point)))
+        (duckdb-query-complete--debug-log "ref-ctx=%S" ref-ctx)
+        (if ref-ctx
+            ;; Reference completion branch
+            (let ((context (plist-get ref-ctx :context)))
+              (pcase context
+                ;; Context 1: @type:name -- complete binding names
+                (:type-name
+                 (let ((type-str (plist-get ref-ctx :type))
+                       (name-start (plist-get ref-ctx :name-start))
+                       (at-pos (plist-get ref-ctx :at-pos)))
+                   (when (duckdb-query-complete--in-completable-string-p
+                          parse-result at-pos)
+                     (let ((candidates
+                            (duckdb-query-complete--binding-candidates
+                             parse-result type-str)))
+                       (duckdb-query-complete--debug-log
+                        "ref @%s: candidates=%S" type-str candidates)
+                       (when candidates
+                         (let ((definitions
+                                (duckdb-query-complete--binding-definitions
+                                 parse-result type-str)))
+                           (list name-start (point) candidates
+                                 :exclusive t
+                                 :company-prefix-length t
+                                 :affixation-function
+                                 (duckdb-query-complete--name-affixation
+                                  type-str definitions))))))))
+                ;; Context 2: @type-prefix -- complete type names
+                (:type-prefix
+                 (let ((type-start (plist-get ref-ctx :type-start))
+                       (at-pos (plist-get ref-ctx :at-pos)))
+                   (when (duckdb-query-complete--in-completable-string-p
+                          parse-result at-pos)
+                     (duckdb-query-complete--debug-log "type-prefix completion")
+                     (list type-start (point)
+                           duckdb-query-complete--type-candidates
                            :exclusive t
                            :company-prefix-length t
-                           :affixation-function
-                           (duckdb-query-complete--name-affixation
-                            type-str definitions))))))))
-          ;; Context 2: @type-prefix -- complete type names
-          (:type-prefix
-           (let ((type-start (plist-get ref-ctx :type-start))
-                 (at-pos (plist-get ref-ctx :at-pos)))
-             (when (duckdb-query-complete--in-completable-string-p
-                    parse-result at-pos)
-               (list type-start (point)
-                     duckdb-query-complete--type-candidates
-                     :exclusive t
-                     :company-prefix-length t
-                     :annotation-function
-                     #'duckdb-query-complete--type-annotation)))))))))
+                           :annotation-function
+                           #'duckdb-query-complete--type-annotation))))))
+          ;; SQL completion branch
+          (when duckdb-query-complete-sql-p
+            (let* ((str-start (nth 8 (syntax-ppss)))
+                   (content-start (1+ str-start))
+                   (sql-beg (duckdb-query-parse-result-sql-beg
+                             parse-result))
+                   (sql-end (duckdb-query-parse-result-sql-end
+                             parse-result)))
+              ;; Only complete in main SQL string
+              (when (and sql-beg sql-end
+                         (> (point) sql-beg)
+                         (< (point) sql-end))
+                (let* ((partial-sql
+                        (buffer-substring-no-properties
+                         content-start (point)))
+                       (sanitized-sql
+                        (duckdb-query-complete--sanitize-for-autocomplete
+                         partial-sql parse-result))
+                       (raw-results
+                        (duckdb-query-complete--sql-candidates
+                         sanitized-sql)))
+                  (if raw-results
+                      (let* ((word-start
+                              (save-excursion
+                                (skip-chars-backward "a-zA-Z0-9_.")
+                                (point)))
+                             (candidates
+                              (mapcar (lambda (row)
+                                        (cdr (assq 'suggestion row)))
+                                      raw-results)))
+                        (duckdb-query-complete--debug-log
+                         "SQL returning %d candidates, start=%d end=%d"
+                         (length candidates) word-start (point))
+                        (list word-start (point) candidates
+                              :exclusive 'no
+                              :company-prefix-length t
+                              :annotation-function
+                              (lambda (_)
+                                duckdb-query-complete--sql-annotation)))
+                    (duckdb-query-complete--debug-log
+                     "SQL branch: no results from DuckDB")
+                    nil))))))))))
 
 ;;;; Minor Mode
 
