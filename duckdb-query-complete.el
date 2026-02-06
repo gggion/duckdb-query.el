@@ -258,9 +258,17 @@ Fast rejection path:
 3. Not at an @ reference trigger -- return nil.
 4. @ position not in a completable string -- return nil.
 
-Coexists with `elisp-completion-at-point' via :exclusive property
-set to \\='no, allowing fallback to other capf functions when this
-function has no applicable candidates.
+Reference completion uses :exclusive t to prevent other capf
+functions (notably `cape-dabbrev') from providing conflicting
+candidates when inside a recognized @type:name context.
+
+Uses :company-prefix-length t to force corfu auto-completion
+regardless of `corfu-auto-prefix' threshold.  Without this,
+corfu ignores our candidates when the completion region (text
+after the colon) is shorter than `corfu-auto-prefix'.
+
+When this function returns nil (not in a completable context),
+other capf functions run normally.
 
 Install via `duckdb-query-complete-mode' or manually:
 
@@ -289,7 +297,8 @@ Uses `duckdb-query-complete--binding-candidates' for candidate extraction."
                                   parse-result type-str)))
                  (when candidates
                    (list name-start (point) candidates
-                         :exclusive 'no
+                         :exclusive t
+                         :company-prefix-length t
                          :annotation-function
                          (duckdb-query-complete--name-annotation
                           type-str)))))))
@@ -301,7 +310,8 @@ Uses `duckdb-query-complete--binding-candidates' for candidate extraction."
                     parse-result at-pos)
                (list type-start (point)
                      duckdb-query-complete--type-candidates
-                     :exclusive 'no
+                     :exclusive t
+                     :company-prefix-length t
                      :annotation-function
                      #'duckdb-query-complete--type-annotation)))))))))
 
