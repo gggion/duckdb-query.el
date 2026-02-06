@@ -475,4 +475,5 @@ or nil if all references in that form are valid."
             (cons result (duckdb-query--validate-all-references result)))
           (duckdb-query-parse-buffer)))
 
+(provide 'duckdb-query-parse)
 ;;; duckdb-query-parse.el ends here
