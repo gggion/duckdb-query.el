@@ -401,6 +401,7 @@ Also see `duckdb-query-complete--populate-cache'."
     (message "DuckDB SQL cache: %d candidates"
              (length duckdb-query-complete--sql-candidates))))
 
+
 ;;;; SQL Autocompletion
 (defun duckdb-query-complete--sql-annotation (candidate)
   "Return annotation for SQL CANDIDATE from cached metadata.
@@ -548,6 +549,109 @@ Also see `duckdb-query-complete-toggle-debug' for logging."
      (duckdb-query-complete--debug-log "sql-candidates ERROR: %S" err)
      nil)))
 
+
+;;;; SQL Autocompcompletion - Static Analysis
+
+(defun duckdb-query-complete--extract-cte-names (parse-result)
+  "Extract CTE names from the SQL string in PARSE-RESULT.
+
+Scan the main SQL string for WITH ... AS patterns and collect
+the CTE names as completion candidates.
+
+Return list of propertized candidate strings with type-label \"cte\".
+
+Called by `duckdb-query-complete-at-point' for static enrichment."
+  (let ((sql-beg (duckdb-query-parse-result-sql-beg parse-result))
+        (sql-end (duckdb-query-parse-result-sql-end parse-result))
+        (names nil))
+    (when (and sql-beg sql-end)
+      (save-excursion
+        (goto-char sql-beg)
+        ;; Match: WITH name AS or , name AS
+        (while (re-search-forward
+                "\\(?:\\bWITH\\b\\|,\\)\\s-+\\([a-zA-Z_][a-zA-Z0-9_]*\\)\\s-+\\bAS\\b"
+                sql-end t)
+          (let* ((name (match-string-no-properties 1))
+                 (candidate (copy-sequence name)))
+            (put-text-property 0 (length candidate)
+                               'duckdb-query--type-label "cte"
+                               candidate)
+            (put-text-property 0 (length candidate)
+                               'duckdb-query--priority 50
+                               candidate)
+            (push candidate names)))))
+    (nreverse names)))
+
+(defun duckdb-query-complete--extract-alias-names (parse-result)
+  "Extract table aliases from the SQL string in PARSE-RESULT.
+
+Scan for FROM/JOIN ... alias patterns where alias is not a keyword.
+Return list of propertized candidate strings with type-label \"alias\".
+
+Called by `duckdb-query-complete-at-point' for static enrichment."
+  (let ((sql-beg (duckdb-query-parse-result-sql-beg parse-result))
+        (sql-end (duckdb-query-parse-result-sql-end parse-result))
+        (names nil)
+        ;; Common keywords that appear after table refs but are not aliases
+        (keywords '("WHERE" "ON" "JOIN" "LEFT" "RIGHT" "INNER" "OUTER"
+                    "CROSS" "FULL" "GROUP" "ORDER" "HAVING" "LIMIT"
+                    "UNION" "INTERSECT" "EXCEPT" "SET" "VALUES"
+                    "QUALIFY" "WINDOW" "USING" "AS" "SELECT")))
+    (when (and sql-beg sql-end)
+      (save-excursion
+        (goto-char sql-beg)
+        ;; Match: FROM/JOIN <source> <alias>
+        ;; where <source> can be identifier, @ref, or (...) subquery
+        (while (re-search-forward
+                "\\b\\(?:FROM\\|JOIN\\)\\s-+\\S-+\\s-+\\([a-zA-Z_][a-zA-Z0-9_]*\\)\\b"
+                sql-end t)
+          (let ((name (match-string-no-properties 1)))
+            (unless (member (upcase name) keywords)
+              (let ((candidate (copy-sequence name)))
+                (put-text-property 0 (length candidate)
+                                   'duckdb-query--type-label "alias"
+                                   candidate)
+                (put-text-property 0 (length candidate)
+                                   'duckdb-query--priority 50
+                                   candidate)
+                (push candidate names)))))))
+    (nreverse names)))
+
+(defun duckdb-query-complete--extract-data-table-names (parse-result)
+  "Extract @data: binding names as table-like candidates.
+
+PARSE-RESULT is a `duckdb-query-parse-result' struct.
+
+Return list of propertized candidate strings with type-label \"data\".
+These are the names that appear after FROM/JOIN as @data:name or @name.
+
+Called by `duckdb-query-complete-at-point' for static enrichment."
+  (let ((bindings (cdr (assq :data
+                              (duckdb-query-parse-result-bindings
+                               parse-result))))
+        (names nil))
+    (dolist (sym bindings)
+      (let* ((name (symbol-name sym))
+             (candidate (copy-sequence name)))
+        (put-text-property 0 (length candidate)
+                           'duckdb-query--type-label "data"
+                           candidate)
+        (put-text-property 0 (length candidate)
+                           'duckdb-query--priority 50
+                           candidate)
+        (push candidate names)))
+    (nreverse names)))
+
+(defun duckdb-query-complete--static-candidates (parse-result)
+  "Collect all static analysis candidates from PARSE-RESULT.
+
+Merge CTE names, table aliases, and @data: binding names into
+a single list of propertized candidates.
+
+Called by `duckdb-query-complete-at-point' in the SQL branch."
+  (append (duckdb-query-complete--extract-cte-names parse-result)
+          (duckdb-query-complete--extract-alias-names parse-result)
+          (duckdb-query-complete--extract-data-table-names parse-result)))
 
 ;;;; Candidate Generation
 
@@ -836,15 +940,22 @@ Also see `duckdb-query-complete-toggle-debug' for debug logging."
                 (pcase duckdb-query-complete-sql-source
                   ;; Cached mode: serve from buffer-local list
                   (:cache
-                   (let ((candidates (duckdb-query-complete--cached-sql-candidates)))
+                   (let* ((cached (duckdb-query-complete--cached-sql-candidates))
+                          (static (duckdb-query-complete--static-candidates
+                                   parse-result))
+                          (candidates (if static
+                                          (append static cached)
+                                        cached)))
                      (when candidates
                        (let ((word-start
                               (save-excursion
                                 (skip-chars-backward "a-zA-Z0-9_.")
                                 (point))))
                          (duckdb-query-complete--debug-log
-                          "SQL cache: %d candidates, start=%d end=%d"
-                          (length candidates) word-start (point))
+                          "SQL cache: %d cached + %d static, start=%d end=%d"
+                          (length (or cached '()))
+                          (length (or static '()))
+                          word-start (point))
                          (list word-start (point) candidates
                                :exclusive 'no
                                :company-prefix-length t
