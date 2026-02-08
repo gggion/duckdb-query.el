@@ -106,9 +106,11 @@ Also see `duckdb-query-complete-sql-p'."
   FROM duckdb_keywords()
   UNION ALL
   SELECT DISTINCT function_name AS label,
-    CASE WHEN function_type = 'aggregate' THEN 'agg'
-         WHEN function_type = 'macro' THEN 'macro'
+    CASE WHEN function_type = 'pragma' THEN 'pragma'
+         WHEN function_type = 'aggregate' THEN 'fn/a'
+         WHEN function_type = 'macro' THEN 'fn/m'
          WHEN function_type = 'table' THEN 'fn->T'
+         WHEN function_type = 'table_macro' THEN 'fn/m->T'
          ELSE 'fn' END AS type_label,
     1000 AS priority
   FROM duckdb_functions()
@@ -124,6 +126,17 @@ Returns three columns: label, type_label, priority.
 Combines keywords, functions, and types from DuckDB metadata.
 Excludes function names that duplicate keyword names.
 Sorts by priority (reserved keywords first) then alphabetically.
+
+Type labels:
+  kw*    - reserved SQL keyword
+  kw     - unreserved SQL keyword
+  fn     - scalar function
+  fn/a   - aggregate function
+  fn/m   - SQL macro
+  fn->T  - table-producing function
+  fn/m->T - table-producing macro
+  pragma - pragma function
+  type   - data type
 
 Called by `duckdb-query-complete--populate-cache'.")
 
