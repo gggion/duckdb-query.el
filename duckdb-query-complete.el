@@ -142,7 +142,7 @@ Rebuilt by `duckdb-query-complete--populate-cache'.
 Used by `duckdb-query-complete-at-point' for zero-latency filtering.")
 
 ;;;; Debugging Utilities
-(defvar duckdb-query-complete--debug t
+(defvar duckdb-query-complete--debug nil
   "When non-nil, log completion events to *duckdb-complete-debug* buffer.")
 
 (defun duckdb-query-complete--debug-log (fmt &rest args)
