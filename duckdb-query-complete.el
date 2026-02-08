@@ -98,9 +98,6 @@ Also see `duckdb-query-complete-sql-p'."
   :package-version '(duckdb-query . "0.8.0"))
 
 ;;;; Internal Variables
-(defconst duckdb-query-complete--sql-annotation " 🦆"
-  "Annotation suffix for SQL autocompletion candidates.")
-
 (defconst duckdb-query-complete--cache-query
   "SELECT label, type_label, priority FROM (
   SELECT DISTINCT keyword_name AS label,
@@ -381,6 +378,54 @@ Also see `duckdb-query-complete--populate-cache'."
              (length duckdb-query-complete--sql-candidates))))
 
 ;;;; SQL Autocompletion
+(defun duckdb-query-complete--sql-annotation (candidate)
+  "Return annotation for SQL CANDIDATE from cached metadata.
+
+Read `duckdb-query--type-label' text property and format as
+right-aligned category label.
+
+Return \" kw*\" for reserved keywords, \" fn\" for scalar
+functions, \" agg\" for aggregates, etc.
+
+Falls back to duck emoji when candidate has no type property
+\(live mode candidates).
+
+Called as :annotation-function in SQL completion branch."
+  (let ((type-label (get-text-property 0 'duckdb-query--type-label
+                                       candidate)))
+    (if type-label
+        (format " %s" type-label)
+      " ddb")))
+
+(defun duckdb-query-complete--sql-sort (candidates)
+  "Sort CANDIDATES by priority then alphabetically.
+
+Read `duckdb-query--priority' text property from each candidate.
+Lower priority values sort first (reserved keywords before functions).
+Candidates without priority sort last.
+
+Called as :display-sort-function in SQL completion branch."
+  (sort (copy-sequence candidates)
+        (lambda (a b)
+          (let ((pa (or (get-text-property 0 'duckdb-query--priority a) 9999))
+                (pb (or (get-text-property 0 'duckdb-query--priority b) 9999)))
+            (if (= pa pb)
+                (string< a b)
+              (< pa pb))))))
+
+(defun duckdb-query-complete--cached-sql-candidates ()
+  "Return cached SQL candidate list, populating if needed.
+
+If cache is nil, attempt population.  If cache is `empty' or
+population fails, return nil.
+
+Return `duckdb-query-complete--sql-candidates' list.
+
+Called by `duckdb-query-complete-at-point' in :cache mode."
+  (when (null duckdb-query-complete--sql-cache)
+    (duckdb-query-complete--populate-cache))
+  (unless (eq duckdb-query-complete--sql-cache 'empty)
+    duckdb-query-complete--sql-candidates))
 
 (defun duckdb-query-complete--sanitize-for-autocomplete (sql parse-result)
   "Replace @type:name references in SQL with parseable substitutions.
@@ -756,9 +801,7 @@ Also see `duckdb-query-complete-toggle-debug' for debug logging."
                            #'duckdb-query-complete--type-annotation))))))
           ;; SQL completion branch
           (when duckdb-query-complete-sql-p
-            (let* ((str-start (nth 8 (syntax-ppss)))
-                   (content-start (1+ str-start))
-                   (sql-beg (duckdb-query-parse-result-sql-beg
+            (let* ((sql-beg (duckdb-query-parse-result-sql-beg
                              parse-result))
                    (sql-end (duckdb-query-parse-result-sql-end
                              parse-result)))
@@ -766,36 +809,55 @@ Also see `duckdb-query-complete-toggle-debug' for debug logging."
               (when (and sql-beg sql-end
                          (> (point) sql-beg)
                          (< (point) sql-end))
-                (let* ((partial-sql
-                        (buffer-substring-no-properties
-                         content-start (point)))
-                       (sanitized-sql
-                        (duckdb-query-complete--sanitize-for-autocomplete
-                         partial-sql parse-result))
-                       (raw-results
-                        (duckdb-query-complete--sql-candidates
-                         sanitized-sql)))
-                  (if raw-results
-                      (let* ((word-start
+                (pcase duckdb-query-complete-sql-source
+                  ;; Cached mode: serve from buffer-local list
+                  (:cache
+                   (let ((candidates (duckdb-query-complete--cached-sql-candidates)))
+                     (when candidates
+                       (let ((word-start
                               (save-excursion
                                 (skip-chars-backward "a-zA-Z0-9_.")
-                                (point)))
-                             (candidates
-                              (mapcar (lambda (row)
-                                        (cdr (assq 'suggestion row)))
-                                      raw-results)))
-                        (duckdb-query-complete--debug-log
-                         "SQL returning %d candidates, start=%d end=%d"
-                         (length candidates) word-start (point))
-                        (list word-start (point) candidates
-                              :exclusive 'no
-                              :company-prefix-length t
-                              :annotation-function
-                              (lambda (_)
-                                duckdb-query-complete--sql-annotation)))
-                    (duckdb-query-complete--debug-log
-                     "SQL branch: no results from DuckDB")
-                    nil))))))))))
+                                (point))))
+                         (duckdb-query-complete--debug-log
+                          "SQL cache: %d candidates, start=%d end=%d"
+                          (length candidates) word-start (point))
+                         (list word-start (point) candidates
+                               :exclusive 'no
+                               :company-prefix-length t
+                               :annotation-function
+                               #'duckdb-query-complete--sql-annotation
+                               :display-sort-function
+                               #'duckdb-query-complete--sql-sort)))))
+                  ;; Live mode: query sql_auto_complete per request
+                  (:live
+                   (let* ((str-start (nth 8 (syntax-ppss)))
+                          (content-start (1+ str-start))
+                          (partial-sql
+                           (buffer-substring-no-properties
+                            content-start (point)))
+                          (sanitized-sql
+                           (duckdb-query-complete--sanitize-for-autocomplete
+                            partial-sql parse-result))
+                          (raw-results
+                           (duckdb-query-complete--sql-candidates
+                            sanitized-sql)))
+                     (when raw-results
+                       (let* ((word-start
+                               (save-excursion
+                                 (skip-chars-backward "a-zA-Z0-9_.")
+                                 (point)))
+                              (candidates
+                               (mapcar (lambda (row)
+                                         (cdr (assq 'suggestion row)))
+                                       raw-results)))
+                         (duckdb-query-complete--debug-log
+                          "SQL live: %d candidates, start=%d end=%d"
+                          (length candidates) word-start (point))
+                         (list word-start (point) candidates
+                               :exclusive 'no
+                               :company-prefix-length t
+                               :annotation-function
+                               (lambda (_) " ddb")))))))))))))))
 
 ;;;; Minor Mode
 
