@@ -327,6 +327,11 @@ in a single statement.  Store raw results in
 `duckdb-query-complete--sql-cache' and build propertized string
 list in `duckdb-query-complete--sql-candidates'.
 
+For keywords (type-label starting with \"kw\"), generate both
+uppercase and lowercase candidates so completion works regardless
+of user's typing case.  Functions and types are stored as returned
+by DuckDB (typically lowercase for functions, uppercase for types).
+
 Uses `duckdb-query-default-database' and session context if
 available.  Falls back to in-memory DuckDB when no database is
 configured.
@@ -340,19 +345,38 @@ Called by `duckdb-query-complete-mode' on enable and by
   (condition-case err
       (let* ((rows (duckdb-query duckdb-query-complete--cache-query
                                  :format :alist))
-             (candidates nil))
+             (candidates nil)
+             (seen (make-hash-table :test 'equal)))
         (dolist (row rows)
           (let* ((label (cdr (assq 'label row)))
                  (type-label (cdr (assq 'type_label row)))
-                 (priority (cdr (assq 'priority row)))
-                 (candidate (copy-sequence label)))
-            (put-text-property 0 (length candidate)
-                               'duckdb-query--type-label type-label
-                               candidate)
-            (put-text-property 0 (length candidate)
-                               'duckdb-query--priority priority
-                               candidate)
-            (push candidate candidates)))
+                 (priority (cdr (assq 'priority row))))
+            ;; Add the original form
+            (unless (gethash label seen)
+              (puthash label t seen)
+              (let ((candidate (copy-sequence label)))
+                (put-text-property 0 (length candidate)
+                                   'duckdb-query--type-label type-label
+                                   candidate)
+                (put-text-property 0 (length candidate)
+                                   'duckdb-query--priority priority
+                                   candidate)
+                (push candidate candidates)))
+            ;; For keywords, also add the other case
+            (when (string-prefix-p "kw" type-label)
+              (let ((alt (if (equal label (upcase label))
+                             (downcase label)
+                           (upcase label))))
+                (unless (gethash alt seen)
+                  (puthash alt t seen)
+                  (let ((candidate (copy-sequence alt)))
+                    (put-text-property 0 (length candidate)
+                                       'duckdb-query--type-label type-label
+                                       candidate)
+                    (put-text-property 0 (length candidate)
+                                       'duckdb-query--priority priority
+                                       candidate)
+                    (push candidate candidates)))))))
         (setq duckdb-query-complete--sql-cache rows)
         (setq duckdb-query-complete--sql-candidates (nreverse candidates))
         (duckdb-query-complete--debug-log
