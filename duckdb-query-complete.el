@@ -74,9 +74,83 @@ Also see `duckdb-query-complete-at-point'."
   :group 'duckdb-query-complete
   :package-version '(duckdb-query . "0.8.0"))
 
+(defcustom duckdb-query-complete-sql-source :cache
+  "Source for SQL autocompletion candidates.
+
+Controls how SQL keyword, function, and type candidates are
+obtained for completion at non-reference positions in SQL strings.
+
+  :cache - Query DuckDB metadata once at mode enable, serve from
+           buffer-local cache.  Zero latency per keystroke.
+           Refresh with `duckdb-query-complete-refresh-cache'.
+
+  :live  - Query DuckDB `sql_auto_complete' on each completion
+           request.  Context-aware but ~35ms latency per keystroke.
+           Best with session executor for ~2ms latency.
+
+Only effective when `duckdb-query-complete-sql-p' is non-nil.
+
+Also see `duckdb-query-complete-refresh-cache'.
+Also see `duckdb-query-complete-sql-p'."
+  :type '(choice (const :tag "Cached metadata (fast)" :cache)
+                 (const :tag "Live sql_auto_complete (context-aware)" :live))
+  :group 'duckdb-query-complete
+  :package-version '(duckdb-query . "0.8.0"))
+
 ;;;; Internal Variables
 (defconst duckdb-query-complete--sql-annotation " 🦆"
   "Annotation suffix for SQL autocompletion candidates.")
+
+(defconst duckdb-query-complete--cache-query
+  "SELECT label, type_label, priority FROM (
+  SELECT DISTINCT keyword_name AS label,
+    CASE WHEN keyword_category = 'reserved' THEN 'kw*' ELSE 'kw' END AS type_label,
+    CASE WHEN keyword_category = 'reserved' THEN 100 ELSE 1000 END AS priority
+  FROM duckdb_keywords()
+  UNION ALL
+  SELECT DISTINCT function_name AS label,
+    CASE WHEN function_type = 'aggregate' THEN 'agg'
+         WHEN function_type = 'macro' THEN 'macro'
+         WHEN function_type = 'table' THEN 'fn->T'
+         ELSE 'fn' END AS type_label,
+    1000 AS priority
+  FROM duckdb_functions()
+  WHERE function_name NOT IN (SELECT keyword_name FROM duckdb_keywords())
+  UNION ALL
+  SELECT DISTINCT type_name AS label, 'type' AS type_label, 1000 AS priority
+  FROM duckdb_types()
+  WHERE database_name = 'system'
+) ORDER BY priority, label"
+  "SQL query to populate the completion cache.
+
+Returns three columns: label, type_label, priority.
+Combines keywords, functions, and types from DuckDB metadata.
+Excludes function names that duplicate keyword names.
+Sorts by priority (reserved keywords first) then alphabetically.
+
+Called by `duckdb-query-complete--populate-cache'.")
+
+(defvar-local duckdb-query-complete--sql-cache nil
+  "Cached SQL completion candidates for current buffer.
+
+List of plists, each with :label, :type-label, and :priority keys.
+Populated by `duckdb-query-complete--populate-cache'.
+Invalidated by `duckdb-query-complete-refresh-cache'.
+
+When nil, the cache has not been populated.  When the symbol `empty',
+population was attempted but DuckDB was unavailable.
+
+Also see `duckdb-query-complete-sql-source'.")
+
+(defvar-local duckdb-query-complete--sql-candidates nil
+  "Flat list of candidate strings derived from `duckdb-query-complete--sql-cache'.
+
+Each string carries text properties:
+  `duckdb-query--type-label' - category string (\"kw*\", \"fn\", \"agg\", etc.)
+  `duckdb-query--priority'   - integer sort key (lower is higher priority)
+
+Rebuilt by `duckdb-query-complete--populate-cache'.
+Used by `duckdb-query-complete-at-point' for zero-latency filtering.")
 
 ;;;; Debugging Utilities
 (defvar duckdb-query-complete--debug t
@@ -245,6 +319,66 @@ Called by `duckdb-query-complete-at-point'."
               (and (> at-pos val-beg)
                    (< at-pos val-end))))))
       (duckdb-query-parse-result-params parse-result)))))
+
+;;;; SQL Completion Cache
+
+(defun duckdb-query-complete--populate-cache ()
+  "Populate SQL completion cache from DuckDB metadata.
+
+Query `duckdb_keywords', `duckdb_functions', and `duckdb_types'
+in a single statement.  Store raw results in
+`duckdb-query-complete--sql-cache' and build propertized string
+list in `duckdb-query-complete--sql-candidates'.
+
+Uses `duckdb-query-default-database' and session context if
+available.  Falls back to in-memory DuckDB when no database is
+configured.
+
+On error (DuckDB unavailable, network failure), set cache to
+symbol `empty' and log to debug buffer.  Does not signal errors.
+
+Called by `duckdb-query-complete-mode' on enable and by
+`duckdb-query-complete-refresh-cache' interactively."
+  (duckdb-query-complete--debug-log "populating SQL cache...")
+  (condition-case err
+      (let* ((rows (duckdb-query duckdb-query-complete--cache-query
+                                 :format :alist))
+             (candidates nil))
+        (dolist (row rows)
+          (let* ((label (cdr (assq 'label row)))
+                 (type-label (cdr (assq 'type_label row)))
+                 (priority (cdr (assq 'priority row)))
+                 (candidate (copy-sequence label)))
+            (put-text-property 0 (length candidate)
+                               'duckdb-query--type-label type-label
+                               candidate)
+            (put-text-property 0 (length candidate)
+                               'duckdb-query--priority priority
+                               candidate)
+            (push candidate candidates)))
+        (setq duckdb-query-complete--sql-cache rows)
+        (setq duckdb-query-complete--sql-candidates (nreverse candidates))
+        (duckdb-query-complete--debug-log
+         "SQL cache populated: %d candidates" (length candidates)))
+    (error
+     (duckdb-query-complete--debug-log "SQL cache population failed: %S" err)
+     (setq duckdb-query-complete--sql-cache 'empty)
+     (setq duckdb-query-complete--sql-candidates nil))))
+
+(defun duckdb-query-complete-refresh-cache ()
+  "Refresh the SQL completion cache from DuckDB metadata.
+
+Re-query `duckdb_keywords', `duckdb_functions', and `duckdb_types'
+and rebuild the candidate list.  Use after loading extensions or
+attaching databases that add new functions or types.
+
+Also see `duckdb-query-complete--populate-cache'."
+  (interactive)
+  (duckdb-query-complete--populate-cache)
+  (if (eq duckdb-query-complete--sql-cache 'empty)
+      (message "DuckDB SQL cache: population failed (see debug buffer)")
+    (message "DuckDB SQL cache: %d candidates"
+             (length duckdb-query-complete--sql-candidates))))
 
 ;;;; SQL Autocompletion
 
@@ -673,6 +807,11 @@ When enabled, `completion-at-point' offers binding names as
 candidates when typing @type:name references inside SQL string
 arguments to `duckdb-query' and related functions.
 
+When `duckdb-query-complete-sql-source' is `:cache' (the default),
+populate the SQL completion cache from DuckDB metadata on enable.
+Use `duckdb-query-complete-refresh-cache' to update after loading
+extensions or attaching databases.
+
 Works with corfu, company-mode, and default completion UI.
 
 Installed at depth -90 in `completion-at-point-functions' to run
@@ -687,8 +826,13 @@ Also see `duckdb-query-complete-at-point' for the capf function."
   :lighter nil
   :group 'duckdb-query-complete
   (if duckdb-query-complete-mode
-      (add-hook 'completion-at-point-functions
-                #'duckdb-query-complete-at-point -90 t)
+      (progn
+        (add-hook 'completion-at-point-functions
+                  #'duckdb-query-complete-at-point -90 t)
+        (when (and duckdb-query-complete-sql-p
+                   (eq duckdb-query-complete-sql-source :cache)
+                   (null duckdb-query-complete--sql-cache))
+          (duckdb-query-complete--populate-cache)))
     (remove-hook 'completion-at-point-functions
                  #'duckdb-query-complete-at-point t)))
 
