@@ -2025,7 +2025,7 @@ result))
 ;;;;; Variable Reference Substitution
 
 (defun duckdb-query--substitute-var-refs (query val-bindings data-bindings data-format temp-files)
-  "Replace @val:NAME references in QUERY with getvariable() calls.
+  "Replace @val:NAME reference in QUERY with call to getvariable().
 
 QUERY is SQL string potentially containing @val:NAME references.
 VAL-BINDINGS is alist of (name . value) pairs for @val: references.
