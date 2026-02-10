@@ -561,7 +561,7 @@ Return alist of (NAME-STRING . DEFINITION-STRING) pairs.
 Return nil if the region does not contain a valid binding list.
 
 Handles quoted and backquoted forms.  Skips unquote markers
-(comma and comma-at).  Recognizes cons pairs by the dot separator
+\(comma and comma-at).  Recognizes cons pairs by the dot separator
 after the car symbol.
 
 Example for :val \\='((min_price . 25) (avg_revenue . (sql \"...\"))):
