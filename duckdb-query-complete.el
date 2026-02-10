@@ -57,6 +57,23 @@
   :group 'duckdb-query
   :prefix "duckdb-query-complete-")
 
+(defcustom duckdb-query-complete-max-buffer-size nil
+  "Maximum buffer size in bytes for completion activation.
+
+When non-nil and buffer size exceeds this value,
+`duckdb-query-complete-at-point' returns nil immediately.
+
+Protects against performance degradation in large `org-mode' buffers
+where `syntax-ppss' is expensive.
+
+When nil, completion activates regardless of buffer size.
+
+Also see `duckdb-query-font-lock-max-buffer-size'."
+  :type '(choice (const :tag "No limit" nil)
+                 (integer :tag "Maximum bytes"))
+  :group 'duckdb-query-complete
+  :package-version '(duckdb-query . "0.8.0"))
+
 (defcustom duckdb-query-complete-sql-p t
   "Whether to offer SQL autocompletion via DuckDB.
 
@@ -702,155 +719,183 @@ Called by `duckdb-query-complete-at-point'."
   (or (cdr (assoc candidate duckdb-query-complete--type-annotations))
       ""))
 
-;;;; Main capf Entry Point
+;;;; Org Mode Integration
 
+(defun duckdb-query-complete--org-src-block-bounds ()
+  "Return (BEG . END) of elisp src block body at point, or nil.
+
+BEG is position after #+begin_src line.
+END is position of #+end_src line.
+
+Only matches emacs-lisp and elisp src blocks.
+Returns nil if point is not inside such a block."
+  (when (derived-mode-p 'org-mode)
+    (save-excursion
+      (let ((pos (point)))
+        (when (re-search-backward
+               "^[ \t]*#\\+begin_src[ \t]+\\(?:emacs-lisp\\|elisp\\)\\b.*$"
+               nil t)
+          (let ((body-beg (1+ (match-end 0))))
+            (when (re-search-forward
+                   "^[ \t]*#\\+end_src[ \t]*$"
+                   nil t)
+              (let ((body-end (match-beginning 0)))
+                (when (and (<= body-beg pos)
+                           (<= pos body-end))
+                  (cons body-beg body-end))))))))))
+
+(defun duckdb-query-complete--in-org-src-block ()
+  "Attempt completion inside an org elisp src block.
+
+Narrow to the src block body, switch to `emacs-lisp-mode-syntax-table',
+and delegate to the standard completion logic.
+
+Returns capf result or nil."
+  (when-let ((bounds (duckdb-query-complete--org-src-block-bounds)))
+    (let ((block-beg (car bounds))
+          (block-end (cdr bounds)))
+      (save-restriction
+        (narrow-to-region block-beg block-end)
+        (with-syntax-table emacs-lisp-mode-syntax-table
+          ;; Now syntax-ppss and list walking operate on pure Elisp
+          ;; within a small region
+          (when (nth 3 (syntax-ppss))
+            (when-let ((parse-result (duckdb-query--parse-at-point)))
+              (let ((ref-ctx (duckdb-query-complete--ref-context-at-point)))
+                (duckdb-query-complete--dispatch
+                 parse-result ref-ctx)))))))))
+
+;;;; Dispatch Logic
+(defun duckdb-query-complete--dispatch (parse-result ref-ctx)
+  "Dispatch completion based on PARSE-RESULT and REF-CTX.
+
+PARSE-RESULT is a `duckdb-query-parse-result' struct.
+REF-CTX is a reference context plist from
+`duckdb-query-complete--ref-context-at-point', or nil.
+
+Return capf result list or nil.
+
+Called by `duckdb-query-complete-at-point' and
+`duckdb-query-complete--in-org-src-block'."
+  (duckdb-query-complete--debug-log "dispatch ref-ctx=%S" ref-ctx)
+  (if ref-ctx
+      ;; Reference completion branch
+      (let ((context (plist-get ref-ctx :context)))
+        (pcase context
+          ;; Context 1: @type:name -- complete binding names
+          (:type-name
+           (let ((type-str (plist-get ref-ctx :type))
+                 (name-start (plist-get ref-ctx :name-start))
+                 (at-pos (plist-get ref-ctx :at-pos)))
+             (when (duckdb-query-complete--in-completable-string-p
+                    parse-result at-pos)
+               (let ((candidates
+                      (duckdb-query-complete--binding-candidates
+                       parse-result type-str)))
+                 (duckdb-query-complete--debug-log
+                  "ref @%s: candidates=%S" type-str candidates)
+                 (when candidates
+                   (let ((definitions
+                          (duckdb-query-complete--binding-definitions
+                           parse-result type-str)))
+                     (list name-start (point) candidates
+                           :exclusive t
+                           :company-prefix-length t
+                           :affixation-function
+                           (duckdb-query-complete--name-affixation
+                            type-str definitions))))))))
+          ;; Context 2: @type-prefix -- complete type names
+          (:type-prefix
+           (let ((type-start (plist-get ref-ctx :type-start))
+                 (at-pos (plist-get ref-ctx :at-pos)))
+             (when (duckdb-query-complete--in-completable-string-p
+                    parse-result at-pos)
+               (duckdb-query-complete--debug-log "type-prefix completion")
+               (list type-start (point)
+                     duckdb-query-complete--type-candidates
+                     :exclusive t
+                     :company-prefix-length t
+                     :annotation-function
+                     #'duckdb-query-complete--type-annotation))))))
+    ;; SQL completion branch
+    (when duckdb-query-complete-sql-p
+      (let* ((sql-beg (duckdb-query-parse-result-sql-beg
+                       parse-result))
+             (sql-end (duckdb-query-parse-result-sql-end
+                       parse-result)))
+        ;; Only complete in main SQL string
+        (when (and sql-beg sql-end
+                   (> (point) sql-beg)
+                   (< (point) sql-end))
+          (let* ((cached (duckdb-query-complete--cached-sql-candidates))
+                 (static (duckdb-query-complete--static-candidates
+                          parse-result))
+                 (candidates (if static
+                                 (append static cached)
+                               cached)))
+            (when candidates
+              (let ((word-start
+                     (save-excursion
+                       (skip-chars-backward "a-zA-Z0-9_.")
+                       (point))))
+                (duckdb-query-complete--debug-log
+                 "SQL cache: %d cached + %d static, start=%d end=%d"
+                 (length (or cached '()))
+                 (length (or static '()))
+                 word-start (point))
+                (list word-start (point) candidates
+                      :exclusive 'no
+                      :company-prefix-length t
+                      :annotation-function
+                      #'duckdb-query-complete--sql-annotation
+                      :display-sort-function
+                      #'duckdb-query-complete--sql-sort)))))))))
+
+;;;; Main capf Entry Point
 (defun duckdb-query-complete-at-point ()
   "Completion-at-point function for `duckdb-query' SQL strings.
 
 Return nil when point is not in a completable context.
 Return (START END COLLECTION . PROPS) for active completion.
 
+In `emacs-lisp-mode', detect string context via `syntax-ppss'
+and parse the enclosing `duckdb-query' form.
+
+In `org-mode', narrow to the current elisp src block body and
+switch to `emacs-lisp-mode-syntax-table' before parsing.  This
+avoids scanning the entire org buffer and ensures correct syntax
+context for list walking and `syntax-ppss'.
+
+Skip entirely when buffer size exceeds
+`duckdb-query-complete-max-buffer-size'.
+
 Completion contexts, checked in order:
 
   @type:partial-name  Complete binding names for that type.
   @partial-type       Complete reference type prefixes.
-  plain SQL text      Complete SQL keywords, functions, types from cache.
-
-Completable string positions:
-- Main SQL string argument to `duckdb-query' family functions
-- String literals inside :val, :sql, and :data parameter values
-
-Fast rejection path:
-1. Not inside a string -- return nil immediately.
-2. Not inside a `duckdb-query' family form -- return nil.
-
-For reference contexts:
-3. At an @ reference trigger -- return binding candidates.
-4. @ position not in a completable string -- return nil.
-
-For SQL completion (when `duckdb-query-complete-sql-p' is non-nil):
-5. Serve cached candidates from `duckdb-query-complete--sql-candidates'.
-6. Merge with static analysis candidates (CTEs, aliases, data bindings).
-7. Use backward word scan from point for START position.
-
-Reference completion uses :exclusive t to prevent other capf
-functions (notably `cape-dabbrev') from providing conflicting
-candidates when inside a recognized @type:name context.
-
-SQL completion uses :exclusive no to allow fallback when cache
-is empty or DuckDB was unavailable at mode enable.
-
-Both branches use :company-prefix-length t to force corfu
-auto-completion regardless of `corfu-auto-prefix' threshold.
-
-Name candidates display binding definitions via
-:affixation-function.  Each candidate shows the value expression
-from the corresponding parameter binding.
-
-SQL candidates are annotated with category labels (kw*, fn, fn/a,
-fn->T, type, etc.) from cached DuckDB metadata.  Static analysis
-candidates (CTEs, aliases, data bindings) sort before DuckDB
-metadata via priority 50 < 100.
-
-When `duckdb-query-complete--debug' is non-nil, all capf calls,
-candidate counts, and errors are logged to the
-*duckdb-complete-debug* buffer.
-
-When this function returns nil (not in a completable context),
-other capf functions run normally.
+  plain SQL text      Complete SQL keywords, functions, types.
 
 Install via `duckdb-query-complete-mode' or manually:
 
   (add-hook \\='completion-at-point-functions
             #\\='duckdb-query-complete-at-point -90 t)
 
-Uses `duckdb-query-complete--ref-context-at-point' for trigger detection.
-Uses `duckdb-query--parse-at-point' for structural analysis.
-Uses `duckdb-query-complete--in-completable-string-p' for boundary check.
-Uses `duckdb-query-complete--binding-candidates' for candidate extraction.
-Uses `duckdb-query-complete--binding-definitions' for value display.
-Uses `duckdb-query-complete--cached-sql-candidates' for SQL candidates.
-Uses `duckdb-query-complete--static-candidates' for parser-derived candidates.
+Uses `duckdb-query-complete--dispatch' for candidate generation.
+Uses `duckdb-query-complete--in-org-src-block' for `org-mode' context.
 Also see `duckdb-query-complete-toggle-debug' for debug logging."
   (duckdb-query-complete--debug-log "capf called at point=%d" (point))
-  ;; Fast rejection: must be inside a string
-  (when (nth 3 (syntax-ppss))
-    ;; Must be inside a duckdb-query family form
-    (when-let* ((parse-result (duckdb-query--parse-at-point)))
-      (let ((ref-ctx (duckdb-query-complete--ref-context-at-point)))
-        (duckdb-query-complete--debug-log "ref-ctx=%S" ref-ctx)
-        (if ref-ctx
-            ;; Reference completion branch
-            (let ((context (plist-get ref-ctx :context)))
-              (pcase context
-                ;; Context 1: @type:name -- complete binding names
-                (:type-name
-                 (let ((type-str (plist-get ref-ctx :type))
-                       (name-start (plist-get ref-ctx :name-start))
-                       (at-pos (plist-get ref-ctx :at-pos)))
-                   (when (duckdb-query-complete--in-completable-string-p
-                          parse-result at-pos)
-                     (let ((candidates
-                            (duckdb-query-complete--binding-candidates
-                             parse-result type-str)))
-                       (duckdb-query-complete--debug-log
-                        "ref @%s: candidates=%S" type-str candidates)
-                       (when candidates
-                         (let ((definitions
-                                (duckdb-query-complete--binding-definitions
-                                 parse-result type-str)))
-                           (list name-start (point) candidates
-                                 :exclusive t
-                                 :company-prefix-length t
-                                 :affixation-function
-                                 (duckdb-query-complete--name-affixation
-                                  type-str definitions))))))))
-                ;; Context 2: @type-prefix -- complete type names
-                (:type-prefix
-                 (let ((type-start (plist-get ref-ctx :type-start))
-                       (at-pos (plist-get ref-ctx :at-pos)))
-                   (when (duckdb-query-complete--in-completable-string-p
-                          parse-result at-pos)
-                     (duckdb-query-complete--debug-log "type-prefix completion")
-                     (list type-start (point)
-                           duckdb-query-complete--type-candidates
-                           :exclusive t
-                           :company-prefix-length t
-                           :annotation-function
-                           #'duckdb-query-complete--type-annotation))))))
-          ;; SQL completion branch
-          (when duckdb-query-complete-sql-p
-            (let* ((sql-beg (duckdb-query-parse-result-sql-beg
-                             parse-result))
-                   (sql-end (duckdb-query-parse-result-sql-end
-                             parse-result)))
-              ;; Only complete in main SQL string
-              (when (and sql-beg sql-end
-                         (> (point) sql-beg)
-                         (< (point) sql-end))
-                (let* ((cached (duckdb-query-complete--cached-sql-candidates))
-                       (static (duckdb-query-complete--static-candidates
-                                parse-result))
-                       (candidates (if static
-                                       (append static cached)
-                                     cached)))
-                  (when candidates
-                    (let ((word-start
-                           (save-excursion
-                             (skip-chars-backward "a-zA-Z0-9_.")
-                             (point))))
-                      (duckdb-query-complete--debug-log
-                       "SQL cache: %d cached + %d static, start=%d end=%d"
-                       (length (or cached '()))
-                       (length (or static '()))
-                       word-start (point))
-                      (list word-start (point) candidates
-                            :exclusive 'no
-                            :company-prefix-length t
-                            :annotation-function
-                            #'duckdb-query-complete--sql-annotation
-                            :display-sort-function
-                            #'duckdb-query-complete--sql-sort))))))))))))
+  ;; Buffer size guard
+  (when (or (null duckdb-query-complete-max-buffer-size)
+            (<= (buffer-size) duckdb-query-complete-max-buffer-size))
+    (cond
+     ;; Org-mode: narrow to src block, use elisp syntax table
+     ((derived-mode-p 'org-mode)
+      (duckdb-query-complete--in-org-src-block))
+     ;; Emacs-lisp-mode: standard path
+     ((nth 3 (syntax-ppss))
+      (when-let ((parse-result (duckdb-query--parse-at-point)))
+        (let ((ref-ctx (duckdb-query-complete--ref-context-at-point)))
+          (duckdb-query-complete--dispatch parse-result ref-ctx)))))))
 
 ;;;; Minor Mode
 
