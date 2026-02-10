@@ -162,6 +162,48 @@ with live preview."
            (duckdb-query-font-lock-apply-preset val)))
   :package-version '(duckdb-query . "0.7.0"))
 
+(defcustom duckdb-query-font-lock-in-org-src-blocks t
+  "Whether to highlight references in `org-mode' src block fontification.
+
+When non-nil, `duckdb-query-font-lock-mode' installs font-lock
+keywords in org's internal fontification buffers with minimal
+overhead, skipping preset application, region extension hooks,
+and contextual JIT lock setup.
+
+When nil, font-lock keywords are not installed in org fontification
+buffers.  References still highlight in dedicated src edit buffers
+opened via \\[org-edit-special].
+
+Has no effect unless `duckdb-query-font-lock-mode' is on
+`emacs-lisp-mode-hook'.
+
+Also see `duckdb-query-font-lock-mode'."
+  :type 'boolean
+  :group 'duckdb-query-font-lock
+  :package-version '(duckdb-query . "0.8.0"))
+
+(defcustom duckdb-query-font-lock-max-buffer-size nil
+  "Maximum buffer size in bytes for reference fontification.
+
+When non-nil and buffer size exceeds this value, fontification
+behavior depends on context:
+
+In `emacs-lisp-mode' buffers, `duckdb-query-font-lock--propertize'
+skips propertization entirely.
+
+In org src fontification buffers, the mode inhibits activation
+regardless of `duckdb-query-font-lock-in-org-src-blocks'.  The
+buffer size checked is the org buffer's size, not the fontification
+buffer's size.
+
+When nil, fontify regardless of buffer size.
+
+Also see `duckdb-query-complete-max-buffer-size'."
+  :type '(choice (const :tag "No limit" nil)
+                 (integer :tag "Maximum bytes"))
+  :group 'duckdb-query-font-lock
+  :package-version '(duckdb-query . "0.8.0"))
+
 ;;;; Preset Application
 
 (defun duckdb-query-font-lock-apply-preset (preset)
@@ -387,36 +429,43 @@ form, validate references, and apply faces.
 When the region starts inside an existing form, find and fontify
 that form first before searching forward.
 
+Skip fontification when buffer size exceeds
+`duckdb-query-font-lock-max-buffer-size'.  This guard protects
+standalone `emacs-lisp-mode' buffers; org fontification buffers
+are guarded at mode activation time.
+
 Return nil to tell font-lock we applied faces ourselves.
 
 Uses `duckdb-query--parse-at-point' for structural parsing.
 Uses `duckdb-query-font-lock--fontify-form' for face application."
-  (let ((start (point))
-        (fontified-forms (make-hash-table :test 'eq)))
-    ;; Handle region starting inside a form
-    (when-let ((form-start (duckdb-query-font-lock--find-form-start start)))
-      (unless (gethash form-start fontified-forms)
-        (save-excursion
+  (when (or (null duckdb-query-font-lock-max-buffer-size)
+            (<= (buffer-size) duckdb-query-font-lock-max-buffer-size))
+    (let ((start (point))
+          (fontified-forms (make-hash-table :test 'eq)))
+      ;; Handle region starting inside a form
+      (when-let ((form-start (duckdb-query-font-lock--find-form-start start)))
+        (unless (gethash form-start fontified-forms)
+          (save-excursion
+            (goto-char form-start)
+            (when-let ((parse-result (duckdb-query--parse-at-point)))
+              (duckdb-query-font-lock--fontify-form parse-result)
+              (puthash form-start t fontified-forms)
+              (setq start (max start
+                               (duckdb-query-parse-result-form-end
+                                parse-result)))))))
+      ;; Search forward for additional forms
+      (goto-char start)
+      (while (re-search-forward duckdb-query--query-function-regexp end t)
+        (let ((form-start (match-beginning 0)))
           (goto-char form-start)
-          (when-let ((parse-result (duckdb-query--parse-at-point)))
-            (duckdb-query-font-lock--fontify-form parse-result)
-            (puthash form-start t fontified-forms)
-            (setq start (max start
-                             (duckdb-query-parse-result-form-end
-                              parse-result)))))))
-    ;; Search forward for additional forms
-    (goto-char start)
-    (while (re-search-forward duckdb-query--query-function-regexp end t)
-      (let ((form-start (match-beginning 0)))
-        (goto-char form-start)
-        (unless (or (duckdb-query--in-string-or-comment-p)
-                    (gethash form-start fontified-forms))
-          (when-let ((parse-result (duckdb-query--parse-at-point)))
-            (duckdb-query-font-lock--fontify-form parse-result)
-            (puthash form-start t fontified-forms)
-            (goto-char (duckdb-query-parse-result-form-end parse-result))))
-        (when (<= (point) form-start)
-          (goto-char (1+ form-start))))))
+          (unless (or (duckdb-query--in-string-or-comment-p)
+                      (gethash form-start fontified-forms))
+            (when-let ((parse-result (duckdb-query--parse-at-point)))
+              (duckdb-query-font-lock--fontify-form parse-result)
+              (puthash form-start t fontified-forms)
+              (goto-char (duckdb-query-parse-result-form-end parse-result))))
+          (when (<= (point) form-start)
+            (goto-char (1+ form-start)))))))
   nil)
 
 (defconst duckdb-query-font-lock--keywords
@@ -457,6 +506,37 @@ Installed on `font-lock-extend-region-functions' by
                     extended t))))))
     extended))
 
+(defun duckdb-query-font-lock--in-org-fontification-p ()
+  "Return non-nil if current buffer is an org src fontification buffer.
+
+Org creates temporary buffers named \" org-src-fontification:*\"
+for src block font-lock.  These buffers run language major modes
+but benefit from lightweight mode activation that skips expensive
+setup like preset application and region extension hooks.
+
+Called by `duckdb-query-font-lock-mode' to select activation path."
+  (string-prefix-p " org-src-fontification:"
+                    (buffer-name)))
+
+(defun duckdb-query-font-lock--org-buffer-too-large-p ()
+  "Return non-nil if the org buffer being fontified exceeds size threshold.
+
+In org fontification buffers, `org-src--source-type' or the buffer
+from which fontification was requested may not be directly accessible.
+Use `buffer-local-value' on buffers matching the org file, or check
+all `org-mode' buffers.
+
+Falls back to checking if any `org-mode' buffer exceeds the threshold,
+which is conservative but safe."
+  (and duckdb-query-font-lock-max-buffer-size
+       (cl-some (lambda (buf)
+                  (and (buffer-live-p buf)
+                       (with-current-buffer buf
+                         (derived-mode-p 'org-mode))
+                       (> (buffer-size buf)
+                          duckdb-query-font-lock-max-buffer-size)))
+                (buffer-list))))
+
 ;;;; Minor Mode
 
 ;;;###autoload
@@ -472,6 +552,13 @@ References are highlighted based on structural parsing by
 or invalid context like @sql: in (sql ...) wrappers) are
 highlighted with `duckdb-query-reference-invalid-face'.
 
+In org src fontification buffers, activation is lightweight: only
+font-lock keywords are installed, skipping preset application and
+region extension hooks.  Controlled by
+`duckdb-query-font-lock-in-org-src-blocks'.  Inhibited entirely
+when `duckdb-query-font-lock-max-buffer-size' is set and the org
+buffer exceeds the threshold.
+
 To enable globally:
 
     (add-hook \\='emacs-lisp-mode-hook #\\='duckdb-query-font-lock-mode)
@@ -482,17 +569,34 @@ style interactively with live preview.
 Also see `duckdb-query' for reference syntax documentation."
   :lighter " DQ"
   :group 'duckdb-query-font-lock
-  (if duckdb-query-font-lock-mode
-      (progn
-        (duckdb-query-font-lock-apply-preset duckdb-query-font-lock-preset)
-        (font-lock-add-keywords nil duckdb-query-font-lock--keywords 'append)
-        (setq-local jit-lock-contextually t)
-        (add-hook 'font-lock-extend-region-functions
-                  #'duckdb-query-font-lock--extend-region nil t))
+  (cond
+   ;; Org fontification buffer
+   ((and duckdb-query-font-lock-mode
+         (duckdb-query-font-lock--in-org-fontification-p))
+    (cond
+     ;; Org buffer too large: inhibit
+     ((duckdb-query-font-lock--org-buffer-too-large-p)
+      (setq duckdb-query-font-lock-mode nil))
+     ;; Lightweight activation enabled
+     (duckdb-query-font-lock-in-org-src-blocks
+      (font-lock-add-keywords nil duckdb-query-font-lock--keywords 'append))
+     ;; Inhibit entirely
+     (t
+      (setq duckdb-query-font-lock-mode nil))))
+   ;; Normal enable
+   (duckdb-query-font-lock-mode
+    (duckdb-query-font-lock-apply-preset duckdb-query-font-lock-preset)
+    (font-lock-add-keywords nil duckdb-query-font-lock--keywords 'append)
+    (setq-local jit-lock-contextually t)
+    (add-hook 'font-lock-extend-region-functions
+              #'duckdb-query-font-lock--extend-region nil t)
+    (font-lock-flush))
+   ;; Disable
+   (t
     (font-lock-remove-keywords nil duckdb-query-font-lock--keywords)
     (remove-hook 'font-lock-extend-region-functions
-                 #'duckdb-query-font-lock--extend-region t))
-  (font-lock-flush))
+                 #'duckdb-query-font-lock--extend-region t)
+    (font-lock-flush))))
 
 (provide 'duckdb-query-font-lock)
 
