@@ -70,10 +70,11 @@
 ;; - `duckdb-query-with-transient-session' - Ephemeral session
 ;;
 ;; Reference types in SQL strings:
-;; - @val:name   Literal value from :val parameter (safe quoting)
-;; - @data:name  Elisp data from :data parameter (serialized to JSON)
-;; - @sql:name   SQL fragment from :sql parameter (text substitution)
-;; - @org:name   Org table from current buffer
+;; - @val:name        Literal value from :val parameter (safe quoting)
+;; - @data:name       Elisp data from :data parameter (serialized to JSON)
+;; - @sql:name        SQL fragment from :sql parameter (text substitution)
+;; - @org:name        Org table from current buffer
+;; - @org:file:name   Org table from specific file
 ;;
 ;; Output formats via :format parameter:
 ;; - :alist (default), :plist, :hash, :vector, :columnar, :org-table
@@ -260,7 +261,7 @@ Also see `duckdb-query' with :format :row for inline usage."
    nil))
 
 (defun duckdb-query-column (query &rest args)
-  "Return single column from QUERY as list.
+  "Return first column from QUERY as list, or specific column via :column.
 
 QUERY is SQL string to execute.
 
@@ -306,9 +307,6 @@ Also see `duckdb-query' with :format :columnar for multiple columns."
       col-data)
      (t
       (append col-data nil)))))
-
-
-
 
 ;;;; Schema Introspection
 
@@ -1589,6 +1587,7 @@ Example:
   ;; => (((id . 1) (name . \"Alice\") (score . 95))
   ;;     ((id . 2) (name . \"Bob\") (score . 87)))
 
+Called by `duckdb-query--resolve-org-ref' for org table conversion.
 Also see `duckdb-query' with :format :org-table."
   (let ((headers (mapcar (lambda (h)
                            (if (symbolp h) h (intern h)))
@@ -1949,7 +1948,7 @@ Called by `duckdb-query--substitute-data-refs' when :data-format is :csv."
 ;;;;; Data Reference Substitution
 
 (defun duckdb-query--substitute-data-refs (query data data-format temp-files)
-"Replace @data:NAME and @NAME references in QUERY with temp file paths.
+  "Replace @data:NAME and @NAME references in QUERY with temp file paths.
 
 DATA is the :data parameter in one of these forms:
 - List of alists: bound to @data implicitly
@@ -1977,56 +1976,56 @@ Shorthand form (existing behavior):
 
 Both forms are equivalent.  Explicit form recommended when query
 contains @org: and @val: references for visual consistency."
-(let ((result query)
-    (serializer (if (eq data-format :csv)
-                    #'duckdb-query--alist-to-csv-file
-                    #'duckdb-query--alist-to-json-file))
-    (file-ext (if (eq data-format :csv) ".csv" ".json"))
-    (bindings
-        (cond
-        ;; nil -> no bindings
-        ((null data)
-        nil)
-        ;; Direct data: list of alists -> bind to 'data
-        ((and (listp data)
-            (listp (car data))
-            (consp (caar data)))
-        `((data . ,data)))
-        ;; List of bindings
-        (t
-        (mapcar
-        (lambda (binding)
-            (pcase binding
-            (`(,(and sym (pred symbolp))
-                . ,(and value (pred listp) (pred (lambda (v)
-                                                    (and v (listp (car v)) (consp (caar v)))))))
-                (cons sym value))
-            (_
-                (error "Invalid data binding: %S" binding))))
-        data)))))
-;; Substitute each binding - try explicit @data:NAME first, then @NAME
-(pcase-dolist (`(,sym . ,alist-data) bindings)
-    (let* ((sym-name (symbol-name sym))
-            ;; Pattern for explicit @data:NAME
-            (explicit-pattern (format "@data:%s\\b" (regexp-quote sym-name)))
-            ;; Pattern for shorthand @NAME
-            (shorthand-pattern (format "@%s\\b" (regexp-quote sym-name)))
-            (temp-file (make-temp-file
-                        (format "duckdb-data-%s-" sym)
-                        nil file-ext)))
-    (funcall serializer alist-data temp-file)
-    (puthash sym temp-file temp-files)
-    ;; Replace explicit form first
-    (setq result (replace-regexp-in-string
-                    explicit-pattern
-                    (format "'%s'" temp-file)
-                    result t t))
-    ;; Then replace shorthand form
-    (setq result (replace-regexp-in-string
-                    shorthand-pattern
-                    (format "'%s'" temp-file)
-                    result t t))))
-result))
+  (let ((result query)
+        (serializer (if (eq data-format :csv)
+                        #'duckdb-query--alist-to-csv-file
+                      #'duckdb-query--alist-to-json-file))
+        (file-ext (if (eq data-format :csv) ".csv" ".json"))
+        (bindings
+         (cond
+          ;; nil -> no bindings
+          ((null data)
+           nil)
+          ;; Direct data: list of alists -> bind to 'data
+          ((and (listp data)
+                (listp (car data))
+                (consp (caar data)))
+           `((data . ,data)))
+          ;; List of bindings
+          (t
+           (mapcar
+            (lambda (binding)
+              (pcase binding
+                (`(,(and sym (pred symbolp))
+                   . ,(and value (pred listp) (pred (lambda (v)
+                                                      (and v (listp (car v)) (consp (caar v)))))))
+                 (cons sym value))
+                (_
+                 (error "Invalid data binding: %S" binding))))
+            data)))))
+    ;; Substitute each binding - try explicit @data:NAME first, then @NAME
+    (pcase-dolist (`(,sym . ,alist-data) bindings)
+      (let* ((sym-name (symbol-name sym))
+             ;; Pattern for explicit @data:NAME
+             (explicit-pattern (format "@data:%s\\b" (regexp-quote sym-name)))
+             ;; Pattern for shorthand @NAME
+             (shorthand-pattern (format "@%s\\b" (regexp-quote sym-name)))
+             (temp-file (make-temp-file
+                         (format "duckdb-data-%s-" sym)
+                         nil file-ext)))
+        (funcall serializer alist-data temp-file)
+        (puthash sym temp-file temp-files)
+        ;; Replace explicit form first
+        (setq result (replace-regexp-in-string
+                      explicit-pattern
+                      (format "'%s'" temp-file)
+                      result t t))
+        ;; Then replace shorthand form
+        (setq result (replace-regexp-in-string
+                      shorthand-pattern
+                      (format "'%s'" temp-file)
+                      result t t))))
+    result))
 
 ;;;;; Variable Reference Substitution
 
@@ -2108,7 +2107,10 @@ Signals error if @val:NAME appears but NAME is not in VAL-BINDINGS."
   "Generate RESET VARIABLE statements for VAL-BINDINGS.
 
 Returns SQL string with RESET VARIABLE for each binding.
-Used in cleanup to avoid polluting session state."
+
+Called by `duckdb-query' during session cleanup to avoid
+polluting session state between queries.
+Also see `duckdb-query--substitute-var-refs' for variable setup."
   (mapconcat
    (lambda (binding)
      (format "RESET VARIABLE %s;" (symbol-name (car binding))))

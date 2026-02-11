@@ -432,7 +432,9 @@ Return nil if reference is valid.
 Return error keyword if invalid:
   :invalid-sql-in-val - @sql: reference inside :val parameter
   :invalid-org-in-val - @org: reference inside :val parameter
-  :undefined          - reference name not found in bindings"
+  :undefined          - reference name not found in bindings
+
+Called by `duckdb-query--validate-all-references'."
   (let ((type (plist-get ref :type))
         (name (plist-get ref :name))
         (context (plist-get ref :context)))
