@@ -29,21 +29,25 @@
 ;;
 ;;     (add-hook 'emacs-lisp-mode-hook #'duckdb-query-complete-mode)
 ;;
-;; Provides completion for @type:name references inside SQL string
-;; arguments to `duckdb-query' and related functions.  Candidates
-;; are extracted from the :sql, :data, and :val keyword parameters
-;; via structural parsing.
+;; Provides two completion contexts inside SQL string arguments to
+;; `duckdb-query' and related functions:
 ;;
-;; Completion triggers:
+;; Reference completion (@type:name):
 ;; - @val:   Complete binding names from :val parameter
 ;; - @data:  Complete binding names from :data parameter
 ;; - @sql:   Complete binding names from :sql parameter
 ;; - @org:   No candidates (org tables resolved externally)
 ;; - @       Complete reference type prefixes
 ;;
+;; SQL completion (keywords, functions, types):
+;; - Populated from DuckDB metadata on mode enable
+;; - Serves ~3400 candidates from buffer-local cache
+;; - Enriched with CTE names, table aliases, @data: bindings
+;; - Controlled by `duckdb-query-complete-sql-p'
+;; - Idle trigger controlled by `duckdb-query-complete-trigger'
+;;
 ;; Uses `duckdb-query-parse.el' for structural analysis.
 ;; Coexists with `elisp-completion-at-point' via :exclusive property.
-
 ;;; Code:
 
 (require 'cl-lib)
