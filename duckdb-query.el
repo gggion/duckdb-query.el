@@ -1498,34 +1498,6 @@ Example:
     (error "Symbol %S is not a function" executor))
   (apply executor query args))
 
-;;;; Low-Level Execution
-(defun duckdb-query-execute-raw (query &optional database _timeout)
-  "Execute QUERY via DuckDB CLI and return raw JSON string.
-
-This is the low-level execution primitive.  Most code should use
-`duckdb-query' or `duckdb-query-execute' instead.
-
-QUERY is SQL string.
-DATABASE is optional path to database file; nil uses in-memory.
-TIMEOUT is reserved for future use; currently ignored.
-
-Return raw JSON output string for parsing.
-Signal error on non-zero exit code.
-
-Use `duckdb-query-executable' for subprocess invocation.
-Wrapped by `duckdb-query-execute' `:cli' method."
-  (with-temp-buffer
-    (let* ((cmd (if database
-                    (list duckdb-query-executable database "-json" "-c" query)
-                  (list duckdb-query-executable "-json" "-c" query)))
-           (default-directory temporary-file-directory)
-           (process-environment (cons "DUCKDB_NO_COLOR=1" process-environment)))
-      (let ((exit-code (apply #'call-process (car cmd) nil t nil (cdr cmd))))
-        (if (zerop exit-code)
-            (buffer-string)
-          (error "DuckDB execution failed (exit %d): %s"
-                 exit-code (string-trim (buffer-string))))))))
-
 ;;;; Format Conversion
 ;;;;; Columnar Format
 
