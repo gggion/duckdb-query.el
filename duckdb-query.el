@@ -643,11 +643,14 @@ This is the core extension point for pluggable execution strategies.
 Implement methods for custom executors to integrate different backends
 while leveraging the unified conversion layer.
 
-EXECUTOR controls execution strategy:
-  :cli       - Direct CLI invocation (default)
+EXECUTOR controls execution strategy.  When nil (the default),
+resolves to `:session' inside `duckdb-query-with-session' scope,
+or `:cli' otherwise.  Explicit values:
+  :cli       - Direct CLI invocation
+  :session   - Persistent process (requires session scope)
   function   - Custom executor function
   symbol     - Function name as symbol
-  object     - Custom executor object with `cl-defmethod'
+  object     - Custom executor object via `cl-defmethod'
 
 QUERY is SQL string to execute.
 
