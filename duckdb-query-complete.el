@@ -93,6 +93,32 @@ Also see `duckdb-query-complete-refresh-cache'."
   :group 'duckdb-query-complete
   :package-version '(duckdb-query . "0.8.0"))
 
+(defcustom duckdb-query-complete-trigger 'always
+  "When to offer `duckdb-query' completion candidates.
+
+Controls whether `duckdb-query-complete-at-point' returns candidates
+during automatic (idle) completion or only on explicit invocation.
+
+  `always'  - Return candidates on every capf call (default).
+              Works with corfu-auto, company-idle-delay, and
+              manual triggers.
+
+  `manual'  - Return candidates only when completion is explicitly
+              invoked via `completion-at-point', `corfu-complete',
+              or equivalent command.  Suppresses candidates during
+              idle/automatic completion triggered by typing.
+
+The `manual' setting is useful when automatic SQL completion
+interferes with normal typing flow.  Reference completion
+\(@type:name) always activates regardless of this setting, since
+it triggers only after the explicit @ character.
+
+Also see `duckdb-query-complete-at-point'."
+  :type '(choice (const :tag "Always (automatic and manual)" always)
+                 (const :tag "Manual invocation only" manual))
+  :group 'duckdb-query-complete
+  :package-version '(duckdb-query . "0.8.0"))
+
 ;;;; Internal Variables
 (defconst duckdb-query-complete--cache-query
   "SELECT label, type_label, priority FROM (
@@ -766,6 +792,24 @@ Returns capf result or nil."
                  parse-result ref-ctx)))))))))
 
 ;;;; Dispatch Logic
+(defun duckdb-query-complete--manual-trigger-p ()
+  "Return non-nil if completion was explicitly invoked by the user.
+
+Detect manual invocation by checking `this-command' against known
+completion commands.  Returns nil during idle/automatic completion
+where `this-command' is typically `self-insert-command'.
+
+Called by `duckdb-query-complete--dispatch' when
+`duckdb-query-complete-trigger' is `manual'."
+  (memq this-command
+        '(completion-at-point
+          corfu-complete
+          company-complete
+          company-manual-begin
+          cape-complete
+          hippie-expand
+          indent-for-tab-command)))
+
 (defun duckdb-query-complete--dispatch (parse-result ref-ctx)
   "Dispatch completion based on PARSE-RESULT and REF-CTX.
 
@@ -818,7 +862,9 @@ Called by `duckdb-query-complete-at-point' and
                      :annotation-function
                      #'duckdb-query-complete--type-annotation))))))
     ;; SQL completion branch
-    (when duckdb-query-complete-sql-p
+    (when (and duckdb-query-complete-sql-p
+               (or (eq duckdb-query-complete-trigger 'always)
+                   (duckdb-query-complete--manual-trigger-p)))
       (let* ((sql-beg (duckdb-query-parse-result-sql-beg
                        parse-result))
              (sql-end (duckdb-query-parse-result-sql-end
