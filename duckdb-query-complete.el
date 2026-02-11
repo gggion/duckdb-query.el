@@ -451,7 +451,7 @@ right-aligned category label.
 Return \" kw*\" for reserved keywords, \" fn\" for scalar
 functions, \" agg\" for aggregates, etc.
 
-Falls back to duck emoji when candidate has no type property
+Falls back to \"ddb\" when candidate has no type property
 \(live mode candidates).
 
 Called as :annotation-function in SQL completion branch."
