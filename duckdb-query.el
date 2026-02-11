@@ -669,8 +669,7 @@ To implement custom executor, define method with `cl-defmethod':
     \"Execute QUERY with custom backend.\"
     ...)
 
-Called by `duckdb-query' to delegate execution.
-Also see Info node `(duckdb-query) Executors' for details."
+Called by `duckdb-query' to delegate execution."
   (error "No executor method defined for %S" executor))
 
 ;;;;; CLI Executor
