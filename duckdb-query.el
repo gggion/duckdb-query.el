@@ -436,6 +436,10 @@ SPEC is either:
     and remaining elements are keyword options:
     :readonly - When non-nil, open database read-only (default nil)
 
+DuckDB creates the database file if it does not exist when opened
+writable (the default).  Use :readonly t to prevent file creation;
+DuckDB signals an error if the file is missing in read-only mode.
+
 Behavior depends on execution context:
 
 Within session scope (inside `duckdb-query-with-session'):
@@ -606,6 +610,10 @@ Also see `duckdb-query-with-transient-session' for ephemeral sessions."
   "Set default database for `duckdb-query' to PATH.
 
 If PATH is nil or empty string, use in-memory database.
+
+DuckDB creates the database file if it does not exist.  Queries
+open in writable mode unless overridden by explicit :readonly
+parameter.
 
 Return previous default database.
 
@@ -2221,6 +2229,8 @@ The reference type in QUERY must match the parameter:
 
 DATABASE is optional database file path.  When nil, uses
 `duckdb-query-default-database' if set, otherwise in-memory database.
+DuckDB creates the file if it does not exist (writable mode is the
+default).
 
 TIMEOUT is optional execution timeout in seconds.  Defaults to
 `duckdb-query-default-timeout'.
