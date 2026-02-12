@@ -434,6 +434,9 @@ Return error keyword if invalid:
   :invalid-org-in-val - @org: reference inside :val parameter
   :undefined          - reference name not found in bindings
 
+Org references are always considered valid since they resolve
+from buffer content, not from parameter bindings.
+
 Called by `duckdb-query--validate-all-references'."
   (let ((type (plist-get ref :type))
         (name (plist-get ref :name))
@@ -443,6 +446,9 @@ Called by `duckdb-query--validate-all-references'."
       :invalid-sql-in-val)
      ((and (eq type 'org) (eq context :val))
       :invalid-org-in-val)
+     ;; Org references resolve from buffer content, not bindings
+     ((eq type 'org)
+      nil)
      ((not (memq name (cdr (assq (intern (format ":%s" type)) bindings))))
       (if (and (eq type 'data)
                (memq name (cdr (assq :data bindings))))
