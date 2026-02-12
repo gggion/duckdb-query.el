@@ -1,514 +1,138 @@
 #+title: duckdb-query.el - Query Anything, Get Elisp
 #+options: toc:nil
 
+#+begin_quote
+[!IMPORTANT]
+Now on MELPA
+#+end_quote
+
 Query remote Parquet files, local CSVs, org-mode tables, and Elisp data
 structures with SQL. Get results as native Elisp values. One function call, no
 intermediate files, no external scripts.
 
-#+begin_html
-<table align="center"><tr>
-    <th width="700px">Query Remote Data, Filter with Elisp, Get Native Structures</th></tr>
-<tr><td>
+#+HTML:<p align="center"><em>Join 336k-row remote Parquet with Elisp alist, parameterized with native SQL variables</em></p>
+#+HTML: <img src="https://github.com/gggion/duckdb-query.el/blob/screenshots/duckdb-full-example.png?raw=true" align="center" width="100%">
 
-<p><strong>Query joining 336k-row remote Parquet with Elisp alist:</strong></p>
-<pre lang="elisp">(let ((carriers '(((code . "UA") (name . "United Airlines"))
+#+begin_html
+<details><summary>
+<strong>code for this example</strong></summary>
+
+<pre lang="elisp">
+(let ((carriers '(((code . "UA") (name . "United Airlines"))
                   ((code . "AA") (name . "American Airlines"))
                   ((code . "DL") (name . "Delta Air Lines")))))
   (duckdb-query
-   "SELECT c.name as airline,
-           {'flights': COUNT(*),
-            'avg_delay': ROUND(AVG(f.arr_delay), 1)} as stats
-    FROM 'https://github.com/rfsaldanha/releases/releases/download/v1/flights.parquet' f
-    JOIN @carriers c ON f.carrier = c.code
+   "SELECT c.name AS airline,
+           COUNT(*) AS flights,
+           ROUND(AVG(f.arr_delay), 1) AS avg_delay
+    FROM read_parquet(@val:url) f
+    JOIN @data:carriers c ON f.carrier = c.code
+    WHERE f.month BETWEEN @val:from_month AND @val:to_month
     GROUP BY c.name
-    ORDER BY COUNT(*) DESC"
+    ORDER BY flights DESC"
    :data `((carriers . ,carriers))
-   :format :columnar))</pre>
+   :val '((url . "https://github.com/rfsaldanha/releases/releases/download/v1/flights.parquet")
+          (from_month . 6) (to_month . 8))
+   :format :columnar))
 
-<p><strong>Result (columnar format with nested structs):</strong></p>
-<pre lang="elisp">((airline . ["United Airlines" "Delta Air Lines" "American Airlines"])
- (stats . [((flights . 58665) (avg_delay . 3.6))
-           ((flights . 48110) (avg_delay . 1.6))
-           ((flights . 32729) (avg_delay . 0.4))]))</pre>
-</td></tr></table>
-<p align="center"><em>One function call: remote Parquet + Elisp filter → nested Elisp structures</em></p>
+;; => ((airline . ["United Airlines" "Delta Air Lines" "American Airlines"])
+;;     (flights . [15165 12695 8495])
+;;     (avg_delay . [8.9 9.6 2.8]))
+</pre>
+</details>
 #+end_html
 
 DuckDB is an embedded analytical database that reads Parquet, CSV, and JSON
 directly from local paths, HTTP URLs, or cloud storage. This package makes
 DuckDB's capabilities available to Elisp programs. The ~duckdb-query~ function
 executes SQL and returns alists, plists, vectors, or org-table-compatible lists.
-Results are ready for ~mapcar~, ~seq-filter~, ~cl-loop~, or direct insertion
-into buffers.
+Results are ready for ~mapcar~, ~seq-filter~, ~cl-loop~, or direct insertion into
+buffers.
 
 The package treats all data sources uniformly. Elisp alists become SQL tables
 via the ~:data~ parameter. Named org tables in your buffer resolve through
-~@org:table-name~ syntax. These combine freely with file paths and URLs in
-joins, unions, and subqueries. A query can join a remote Parquet file with a
-ten-row org table and a runtime Elisp variable, returning the result as an
-alist you can immediately process.
-
-* COMMENT README
-# ================
-
-=This commented out treee is for usage inside of emacs=
-=without all the html getting in the way=
-
-# ================
-
-#+begin_src elisp :results code
-(let ((carriers '(((code . "UA") (name . "United Airlines"))
-                  ((code . "AA") (name . "American Airlines"))
-                  ((code . "DL") (name . "Delta Air Lines")))))
-  (duckdb-query
-   "SELECT c.name as airline,
-           {'flights': COUNT(*),
-            'avg_delay': ROUND(AVG(f.arr_delay), 1)} as stats
-    FROM 'https://github.com/rfsaldanha/releases/releases/download/v1/flights.parquet' f
-    JOIN @carriers c ON f.carrier = c.code
-    GROUP BY c.name
-    ORDER BY COUNT(*) DESC"
-   :data `((carriers . ,carriers))
-   :format :columnar))
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-((airline . ["United Airlines" "Delta Air Lines" "American Airlines"])
- (stats
-  . [((flights . 58665) (avg_delay . 3.6)) ((flights . 48110) (avg_delay . 1.6))
-     ((flights . 32729) (avg_delay . 0.4))]))
-#+end_src
-
-** COMMENT Quick Examples
-
-#+begin_src elisp :results code
-(duckdb-query
- "SELECT 'Alice' as name, 95 as score
-  UNION ALL SELECT 'Bob', 87")
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-(((name . "Alice") (score . 95)) ((name . "Bob") (score . 87)))
-#+end_src
-
-#+begin_src elisp :results code
-(duckdb-query
- "SELECT * FROM range(1,4) t(n),
-   (SELECT unnest(['a','b']) as letter)"
- :format :org-table)
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-((n letter) (1 "a") (2 "a") (3 "a") (1 "b") (2 "b") (3 "b"))
-#+end_src
-
-#+begin_src elisp :results code
-(duckdb-query-value
- "SELECT COUNT(*) FROM range(1000)")
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-1000
-#+end_src
-
-#+begin_src elisp :results code
-(duckdb-query-column "SELECT unnest(['red','green','blue']) as color")
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-("red" "green" "blue")
-#+end_src
-
-#+begin_src elisp :results code
-(duckdb-query
- "SELECT * FROM range(5) t(n)"
- :format :columnar)
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-((n . [0 1 2 3 4]))
-#+end_src
-
-** COMMENT Querying Elisp Data
-
-Pass Elisp alists to queries via the ~:data~ parameter. The data becomes a table
-named ~@data~:
-
-#+begin_src elisp :results code
-(duckdb-query
- "SELECT name, score * 1.1 as curved
-  FROM @data
-  WHERE score > 85"
- :data '(((name . "Aly") (score . 95))
-         ((name . "Bob") (score . 87))
-         ((name . "Carol") (score . 72))))
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-(((name . "Aly") (curved . 104.5)) ((name . "Bob") (curved . 95.7)))
-#+end_src
-
-For multiple tables, use named bindings with backquote to capture lexical
-variables:
-
-#+begin_src elisp :results code
-(let ((users ;; users table
-       '(((id . 1) (name . "Alice"))
-         ((id . 2) (name . "Bob"))))
-      (orders ;; orders table
-       '(((user_id . 1) (item . "Widget"))
-         ((user_id . 2) (item . "Gadget"))
-         ((user_id . 1) (item . "Gizmo")))))
-  (duckdb-query
-   "SELECT u.name, COUNT(*) as count
-    FROM @users u
-    JOIN @orders o ON u.id = o.user_id
-    GROUP BY u.name"
-   :data `((users . ,users)
-           (orders . ,orders))))
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-(((name . "Alice") (count . 2)) ((name . "Bob") (count . 1)))
-#+end_src
-
-This enables joining runtime Elisp state with static file data. Previously this
-required exporting to CSV, running an external query, and parsing results. Now
-it is one expression.
-
-** COMMENT Querying Org Tables
-
-Reference named org tables with ~@org:table-name~. Given this table in your
-buffer:
-
-#+NAME: inventory
-| sku   | product | stock | price |
-|-------+---------+-------+-------|
-| A-100 | Widget  |    50 |  9.99 |
-| B-200 | Gadget  |    30 | 24.99 |
-| C-300 | Gizmo   |    75 | 14.99 |
-
-#+begin_src elisp :results code
-(duckdb-query
- "SELECT product,
-    stock * price as value
-  FROM @org:inventory
-  ORDER BY value DESC"
- :format :org-table)
-#+end_src
-
-Reference tables in other files with ~@org:path/to/file.org:table-name~.
-
-** COMMENT Combining Sources
-
-Join an org table with Elisp data:
-#+begin_src elisp :results code
-(let ((sales '(((sku . "A-100") (qty . 10))
-               ((sku . "A-100") (qty . 5))
-               ((sku . "C-300") (qty . 20)))))
-  (duckdb-query
-   "SELECT i.product,
-           SUM(s.qty) as sold,
-           i.stock - SUM(s.qty) as remaining
-    FROM @org:inventory i
-    JOIN @sales s ON i.sku = s.sku
-    GROUP BY i.product, i.stock"
-   :data `((sales . ,sales))))
-#+end_src
-
-Join a remote Parquet file with local Elisp configuration:
-#+begin_src elisp :results code
- (let ((airports '(((code . "JFK")
-                   (name . "JFK International"))
-                  ((code . "LGA")
-                   (name . "LaGuardia")))))
-  (duckdb-query
-   "SELECT a.name,
-           COUNT(*) as departures,
-           ROUND(AVG(f.dep_delay), 1) as avg_delay
-    FROM 'https://github.com/rfsaldanha/releases/releases/download/v1/flights.parquet' as f
-    JOIN @airports a ON f.origin = a.code
-    GROUP BY a.name
-    ORDER BY departures DESC"
-   :data `((airports . ,airports))))
-
-;; => (((name . "JFK International") (departures . 111279) (avg_delay . 12.1))
-;;     ((name . "LaGuardia") (departures . 104662) (avg_delay . 10.3)))
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-(((name . "JFK International") (departures . 111279) (avg_delay . 12.1))
- ((name . "LaGuardia") (departures . 104662) (avg_delay . 10.3)))
-#+end_src
-
-** COMMENT Output Formats
-
-The ~:format~ parameter controls result structure:
-
-| Format       | Structure                 | Use Case                      |
-|--------------+---------------------------+-------------------------------|
-| ~:alist~     | List of alists            | General Elisp processing      |
-| ~:plist~     | List of plists            | Keyword-based access          |
-| ~:hash~      | List of hash-tables       | O(1) field lookup             |
-| ~:vector~    | Vector of alists          | Index-based access            |
-| ~:columnar~  | Alist of column vectors   | Numerical analysis            |
-| ~:org-table~ | List of lists with header | Display, org-mode integration |
-| ~:raw~       | JSON string               | Custom parsing                |
-
-** COMMENT Schema Introspection
-Discover structure before querying:
-
-#+begin_src elisp :results code :exports both
-(duckdb-query-column-types "SELECT 1 as id, 'text' as name, 3.14 as value")
-;; => (("id" . "INTEGER") ("name" . "VARCHAR") ("value" . "DECIMAL(3,2)"))
-#+end_src
-
-#+begin_src elisp :results code :exports both
-(duckdb-query-columns
- "https://github.com/rfsaldanha/releases/releases/download/v1/flights.parquet")
-
-;; => ("year" "month" "day" "dep_time" "sched_dep_time" "dep_delay" "arr_time"
-;;     "sched_arr_time" "arr_delay" "carrier" "flight" "tailnum" "origin" "dest"
-;;     "air_time" "distance" "hour" "minute" "time_hour")
-#+end_src
-
-** COMMENT Database Persistence
-
-#+begin_src elisp :results code
-(duckdb-query-with-transient-database
-  (duckdb-query
-   "CREATE TABLE events (id INT, name TEXT)")
-  (duckdb-query
-   "INSERT INTO events VALUES
-    (1, 'click'), (2, 'scroll')")
-  (duckdb-query "SELECT * FROM events"))
-#+end_src
-
-#+results:
-#+begin_src elisp
-(((id . 1) (name . "click")) ((id . 2) (name . "scroll")))
-#+end_src
-
-
-~duckdb-query-with-transient-database~ creates a temporary file deleted after the
-block. Use ~duckdb-query-with-database~ for persistent files:
-
-#+begin_src elisp :results code
-(duckdb-query-with-database '("analytics.duckdb")
-  (duckdb-query "SELECT COUNT(*) FROM events"))
-#+end_src
-** COMMENT Nested Types
-
-DuckDB supports STRUCT, LIST, MAP, and ARRAY types. These serialize correctly as
-nested Elisp structures:
-
-#+begin_src elisp :results code
-(duckdb-query
- "SELECT
-    {'x': 1, 'y': 2}::STRUCT(x INT, y INT)
-    as point")
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-(((point (x . 1) (y . 2))))
-#+end_src
-
-#+begin_src elisp :results code
-;; Nested data survives roundtrips
-(let ((data
-       '(((id . 1) (loc (x . 10) (y . 20)))
-         ((id . 2) (loc (x . 30) (y . 40))))))
-  (duckdb-query
-   "SELECT id, loc.x + loc.y as sum
-    FROM @data"
-   :data data))
-#+end_src
-
-#+RESULTS:
-#+begin_src elisp
-(((id . 1) (sum . 30)) ((id . 2) (sum . 70)))
-#+end_src
-
-** COMMENT Performance
-
-The package writes results to temporary files by default, providing 3-5x speedup
-on large results compared to streaming through stdout:
-
-: | Result Size | Default (file) | Streaming (pipe) | Speedup |
-: |-------------+----------------+------------------+---------|
-: | 10k rows    | 64ms           | 162ms            | 2.5x    |
-: | 100k rows   | 366ms          | 1.28s            | 3.5x    |
-: | 500k rows   | 1.32s          | 6.19s            | 4.7x    |
-
-Force streaming mode with ~:output-via :pipe~ when needed. DDL statements
-automatically use streaming since they cannot be wrapped in file output.
-
-Profile your specific queries with the benchmark module:
-
-#+begin_src elisp
-(duckdb-query-bench-output-strategies
- "SELECT * FROM range(10000) t(i)"
- :iterations 3)
-#+end_src
-
-#+RESULTS:
-| strategy | mean    | min     | max     | n |
-| :file    | 20.62ms | 20.12ms | 21.52ms | 3 |
-| :pipe    | 20.84ms | 20.50ms | 21.42ms | 3 |
-| :speedup | 1.01x   |         |         |   |
-
-Other benchmark functions: ~duckdb-query-bench-formats~ (compare output formats),
-~duckdb-query-bench-nested-types~ (compare nested type handling),
-~duckdb-query-bench-data-formats~ (compare ~:data~ serialization).
-
-** COMMENT Acknowledgements
-
-- [[https://github.com/ak-coram/cl-duckdb][cl-duckdb]] by Ákos Kiss: The Common Lisp DuckDB wrapper that inspired this
-  package's design philosophy. The approach of treating query results as native
-  Lisp data structures, the ~with-static-table~ pattern for querying Lisp data
-  directly, and the ~with-transient-connection~ / ~with-default-connection~
-  macros for database context management all informed the design of
-  duckdb-query's ~:data~ parameter, ~@org:~ references, and
-  ~duckdb-with-transient-database~ / ~duckdb-with-database~ forms.
-
-** COMMENT Related Packages
-- [[https://github.com/jhinch/ob-duckdb][ob-duckdb]]: Org Babel integration for DuckDB source blocks. SOON I'll add most
-  of the functionalities here to it via a specialized ob-duckdb-query executor,
-  this will allow org-table reference in duckdb-sql source blocks and new output
-  types.
-
-** Integration
-:PROPERTIES:
-:CUSTOM_ID: integration
-:END:
-
-#+begin_quote
-[!WARNING]
-UNDER CONSTRUCTION
-#+end_quote
-
-As mentioned before, sessions allow low-latency, fast response times, going as
-low as 2ms on frequent, repeating small queries like batched updates/inserts and
-single row extraction. Add to this persistent session processes that can
-communicate between each other via database ~ATTACH~/~DETACH~ or external file
-output/input, and we have the *foundation for database-backed major modes, worker
-pools, and orchestrated data pipelines within Emacs.*
-
-
-*** Buffer-Local Sessions
-
-The ~duckdb-query-session-setup-buffer~ helper attaches a session to the current
-buffer. It creates the session if needed, registers the buffer as an owner, and
-sets up the buffer-local binding so all ~duckdb-query~ calls within that buffer
-automatically route to the session. The session persists while any owning buffer
-exists and is killed when the last owner closes:
-
-#+begin_src elisp
-(add-hook 'my-data-mode-hook
-          (lambda ()
-            (duckdb-query-session-setup-buffer "my-data-session")))
-;; All my-data-mode buffers share one session
-;; Session killed when last my-data-mode buffer closes
-#+end_src
-
-This pattern enables major modes that maintain persistent analytical state. A
-dashboard mode might cache expensive aggregations in session tables and refresh
-instantly on demand:
-
-#+begin_src elisp
-(define-derived-mode my-dashboard-mode special-mode "Dashboard"
-  (duckdb-query-session-setup-buffer "dashboard")
-  (setq-local revert-buffer-function #'my-dashboard-refresh))
-
-(defun my-dashboard-refresh (&rest _)
-  "Refresh dashboard from session's cached aggregations."
-  (let ((data (duckdb-query "SELECT * FROM cached_metrics")))
-    (my-dashboard-render data)))
-#+end_src
-
-*** Lifecycle Hooks
-
-Three hooks provide visibility into session activity, enabling logging, metrics
-collection, and cross-session coordination:
-
-#+begin_src elisp
-;; Log all queries with timing
-(add-hook 'duckdb-query-session-query-executed-functions
-          (lambda (name query duration-ms)
-            (message "[%s] %.1fms: %s"
-                     name duration-ms
-                     (truncate-string-to-width query 60))))
-
-;; Track session lifecycle
-(add-hook 'duckdb-query-session-created-functions
-          (lambda (name _session)
-            (message "Session started: %s" name)))
-
-(add-hook 'duckdb-query-session-killed-functions
-          (lambda (name)
-            (message "Session ended: %s" name)))
-#+end_src
-
-These hooks will be essential for building a coordinator layer that manages
-worker sessions, tracks query performance across the system, and handles
-failover when sessions die unexpectedly.
-
-*** Future Directions
-
-This infrastructure opens up architectural patterns that go beyond single-query
-workflows. The ultimate goal is to enable the creation of data-centric emacs
-packages and tools, such as:
-
-- quickly retrieving tabular data from most filetypes or complex queries
-- perform tens to hundreds of CRUD operations per second
-- manage and orchestrate data processing jobs across multiple workers from a central coordinator
-- leverage [[https://github.com/cwida/duckpgq-extension][graph queries]], [[https://github.com/duckdb/duckdb-spatial][geo-spatial processing]], [[https://github.com/duckdb/duckdb-vss][vector similarity search]] and other techniques inside Emacs
-
-Some directions still in design:
-
-- *Database-backed buffers*: Major modes where buffer content is backed by
-  session tables, enabling SQL-powered search, filter, and transform operations
-  that would be impractical with pure Elisp
-- *Worker pools*: Multiple sessions processing jobs in parallel, coordinated
-  through a shared database via ~ATTACH~ or message-passing through elisp.
-- *Live dashboards*: Buffers that subscribe to query results and refresh
-  automatically when underlying data changes
-
-I'll update this section as these experiments mature into usable packages.
+~@org:table-name~ syntax. These combine freely with file paths and URLs in joins,
+unions, and subqueries. A query can join a remote Parquet file with a ten-row
+org table and a runtime Elisp variable, returning the result as an alist you can
+immediately process.
 
 * Quick Examples
+#+begin_quote
+[!TIP]
+Disclaimer: If you want to read this inside emacs in an org-mode buffer,
+you can check the [[file:README-EMACS.org][this version]]: same contents but without any of the html so you
+can test all source blocks directly..
+#+end_quote
+
+All of these are executable, copy them into an org mode source block or execute
+them directly to try them out after installing the package.
 #+begin_html
 <table align="center"><tr>
     <th width="500px">Code</th>
     <th width="500px">Result</th></tr>
 <tr><td>
-<pre lang="elisp">;; List of alists (default)
+<pre lang="emacs-lisp">;; List of alists (default)
 (duckdb-query
- "SELECT 'Alice' as name, 95 as score
-  UNION ALL SELECT 'Bob', 87")</pre>
+ "SELECT name:'Alice', score:95
+  UNION ALL
+    SELECT 'Bob', 87")</pre>
 </td><td>
-<pre lang="elisp">(((name . "Alice") (score . 95))
+<pre lang="emacs-lisp">(((name . "Alice") (score . 95))
  ((name . "Bob") (score . 87)))</pre>
+</td></tr>
+
+<!-- spacing -->
+<tr></tr>
+<tr><td>
+<pre lang="emacs-lisp">
+;; Single value extraction
+(duckdb-query
+ "FROM range(1000)
+  SELECT COUNT(*)"
+ :format :single)</pre>
+</td><td>
+<pre lang="emacs-lisp">1000</pre>
 </td></tr>
 
 <!-- spacing -->
 <tr></tr>
 
 <tr><td>
-<pre lang="elisp">;; Org-table format for display
+<pre lang="emacs-lisp">;; Single row as alist
 (duckdb-query
- "SELECT * FROM range(1,4) t(n),
-   (SELECT unnest(['a','b']) as letter)"
+ "SELECT name:'Alice',
+         score: 95,
+         grade: 'A'"
+ :format :row)</pre>
+</td><td>
+<pre lang="emacs-lisp">((name . "Alice")
+ (score . 95)
+ (grade . "A"))</pre>
+</td></tr>
+
+<!-- spacing -->
+<tr></tr>
+
+<tr><td>
+<pre lang="emacs-lisp">;; Single column as list
+(duckdb-query
+ "SELECT
+     unnest(['red','green','blue'])
+  as color"
+ :format :column)</pre>
+</td><td>
+<pre lang="emacs-lisp">("red" "green" "blue")</pre>
+</td></tr>
+
+<!-- spacing -->
+<tr></tr>
+
+<tr><td>
+<pre lang="emacs-lisp">
+;; Org-table format for display
+(duckdb-query
+ "FROM range(1,4) t(n),
+ (SELECT letter: unnest(['a','b']))"
  :format :org-table)</pre>
 </td><td>
 <pre>
@@ -528,56 +152,236 @@ I'll update this section as these experiments mature into usable packages.
 <tr></tr>
 
 <tr><td>
-<pre lang="elisp">;; Single value extraction
-(duckdb-query-value
- "SELECT COUNT(*) FROM range(1000)")</pre>
-</td><td>
-<pre lang="elisp">1000</pre>
-</td></tr>
-
-<!-- spacing -->
-<tr></tr>
-
-<tr><td>
-<pre lang="elisp">;; Single column as list
-(duckdb-query-column
- "SELECT unnest(
- ['red','green','blue']) as color")</pre>
-</td><td>
-<pre lang="elisp">("red" "green" "blue")</pre>
-</td></tr>
-
-<!-- spacing -->
-<tr></tr>
-
-<tr><td>
-<pre lang="elisp">;; Columnar format for analysis
+<pre lang="emacs-lisp">;; Columnar format for analysis
 (duckdb-query
- "SELECT * FROM range(5) t(n)"
+ "SELECT n, n * 2 as doubled
+  FROM range(5) t(n)"
  :format :columnar)</pre>
 </td><td>
-<pre lang="elisp">((n . [0 1 2 3 4]))</pre>
-</td></tr></table>
+<pre lang="emacs-lisp">((n . [0 1 2 3 4])
+ (doubled . [0 2 4 6 8]))</pre>
+</td></tr>
+
+<!-- spacing -->
+<tr></tr>
+
+<tr><td>
+<pre lang="emacs-lisp">
+;; Safe parameterization with @val:
+(duckdb-query
+ "SELECT * FROM range(10) t(n)
+  WHERE n > @val:threshold"
+ :val '((threshold . 5))
+ :format :column)</pre>
+</td><td>
+<pre lang="emacs-lisp">(6 7 8 9)</pre>
+</td></tr>
+
+<!-- spacing -->
+<tr></tr>
+
+<tr><td>
+<pre lang="emacs-lisp">;; Query fragment composition
+(duckdb-query
+ "SELECT * FROM (@sql:source)
+  WHERE n > 2"
+ :sql '((source .
+         "SELECT * FROM range(5) t(n)"))
+ :format :column)</pre>
+</td><td>
+<pre lang="emacs-lisp">(3 4)</pre>
+</td></tr>
+</table>
 #+end_html
+
+For advanced parameterization including computed thresholds, sequential variable
+dependencies, and fragment composition with embedded references, see
+[[#parameterized-queries][Parameterized Queries]].
 * Contents :noexport:
 :PROPERTIES:
 :TOC:      :include siblings :depth 1 :ignore this
 :END:
 :CONTENTS:
+- [[#installation][Installation]]
+- [[#configuration][Configuration]]
 - [[#querying-elisp-data][Querying Elisp Data]]
 - [[#querying-org-tables][Querying Org Tables]]
 - [[#combining-sources][Combining Sources]]
+- [[#parameterized-queries][Parameterized Queries]]
 - [[#output-formats][Output Formats]]
 - [[#schema-introspection][Schema Introspection]]
 - [[#database-persistence][Database Persistence]]
-- [[#new-session-based-execution][(NEW) Session-Based Execution]]
+- [[#session-based-execution][Session-Based Execution]]
 - [[#nested-types][Nested Types]]
 - [[#performance][Performance]]
+- [[#font-lock-for-reference-syntax][Font Lock for Reference Syntax]]
+- [[#sql-completion][SQL Completion]]
 - [[#acknowledgements][Acknowledgements]]
 - [[#related-packages][Related Packages]]
 - [[#integration][Integration]]
 :END:
 
+* Installation
+:PROPERTIES:
+:CUSTOM_ID: installation
+:END:
+duckdb-query is available on MELPA. Install with =M-x package-install= ⏎ =duckdb-query=.
+Requires the =duckdb= CLI executable in your PATH. Install from [[https://duckdb.org/docs/installation/][duckdb.org]] or via package manager:
+
+#+begin_src shell
+brew install duckdb # macOS
+sudo apt install duckdb # Ubuntu/Debian
+# Or download directly from duckdb.org
+#+end_src
+
+- MELPA (recommended) ::
+#+begin_src emacs-lisp
+(use-package duckdb-query
+  :ensure t)
+#+end_src
+
+- use-package with vc (Emacs 30+) ::
+#+begin_src emacs-lisp
+(use-package duckdb-query
+  :vc (:url "https://github.com/gggion/duckdb-query.el"
+       :rev :newest))
+#+end_src
+
+- Straight or Elpaca ::
+#+begin_src emacs-lisp
+(straight-use-package 'duckdb-query)
+;; OR
+(elpaca duckdb-query)
+#+end_src
+
+The core =duckdb-query= function works immediately after installation.  For
+optional editor enhancements (syntax highlighting and completion inside SQL
+strings), see [[#configuration][Configuration]].
+* Configuration
+:PROPERTIES:
+:CUSTOM_ID: configuration
+:END:
+
+The package works out of the box with sensible defaults. The =duckdb-query=
+function requires no configuration. See =M-x customize-group RET duckdb-query RET=
+for all options.
+
+** Key Variables
+
+- ~duckdb-query-executable~ : Path to DuckDB CLI (default: ="duckdb"=)
+- ~duckdb-query-default-timeout~ : Query timeout in seconds (default: =30=)
+- ~duckdb-query-null-value~ : Elisp representation of SQL NULL (default: =:null=)
+- ~duckdb-query-false-value~ : Elisp representation of SQL FALSE (default: =:false=)
+
+** Editor Support for SQL Strings (Optional)
+
+Two optional minor modes enhance editing =duckdb-query= SQL strings. These are
+not required for the package to function but improve the development experience
+when writing queries in Elisp or Org buffers:
+
+- ~duckdb-query-font-lock-mode~ : Highlights =@type:name= references with
+  validation. Invalid references (undefined bindings, invalid context) show a
+  warning face. Works in =emacs-lisp-mode= buffers and inside org-mode src
+  blocks.
+
+- ~duckdb-query-complete-mode~ : Provides completion-at-point for reference
+  names, SQL keywords, functions, and types. Works with corfu, company-mode, and
+  the default completion UI. In org-mode, narrows to the current src block for
+  efficient parsing.
+
+#+HTML: <img src="https://github.com/gggion/duckdb-query.el/blob/screenshots/duckdb-query-font-completion.png?raw=true" align="center" width="100%">
+#+HTML: <p align="center"><em>Example with both modes enabled, autocompletion and custom reference highlights</em></p>
+
+Both modes are independent and share the same structural parser.
+
+*** Enabling via use-package
+
+#+begin_src emacs-lisp
+(use-package duckdb-query
+  :ensure t
+  :config
+  (add-hook 'emacs-lisp-mode-hook #'duckdb-query-font-lock-mode)
+  (add-hook 'emacs-lisp-mode-hook #'duckdb-query-complete-mode)
+  (add-hook 'org-mode-hook #'duckdb-query-complete-mode))
+#+end_src
+
+*** Enabling Manually
+
+#+begin_src emacs-lisp
+;; Highlight @type:name references with validation
+(add-hook 'emacs-lisp-mode-hook #'duckdb-query-font-lock-mode)
+
+;; Complete reference names, SQL keywords, functions, and types
+(add-hook 'emacs-lisp-mode-hook #'duckdb-query-complete-mode)
+(add-hook 'org-mode-hook #'duckdb-query-complete-mode)
+#+end_src
+
+Adding ~duckdb-query-font-lock-mode~ to =emacs-lisp-mode-hook= also highlights
+references inside org-mode =emacs-lisp= src blocks automatically. In org's
+fontification buffers, the mode activates with minimal overhead. To disable
+highlighting in org src blocks entirely:
+
+#+begin_src emacs-lisp
+(setq duckdb-query-font-lock-in-org-src-blocks nil)
+#+end_src
+
+*** Performance in Large Buffers
+
+Both modes accept buffer size thresholds. When set, the modes skip their
+expensive operations in buffers exceeding the threshold:
+
+#+begin_src emacs-lisp
+;; Skip reference fontification in large buffers
+(setq duckdb-query-font-lock-max-buffer-size 512000)  ; 500KB
+
+;; Skip completion in large buffers
+(setq duckdb-query-complete-max-buffer-size 512000)    ; 500KB
+#+end_src
+
+For font-lock, the threshold applies to both standalone =.el= files and the org
+buffer that triggered src block fontification. For completion, the threshold
+applies to the buffer where completion is invoked.
+
+*** Completion Trigger Behavior
+
+The completion mode provides candidates when triggered. Whether candidates
+appear automatically on each keypress or only on explicit invocation depends
+on your completion framework:
+
+| Framework | Automatic (on keypress)      | Manual trigger        |
+|-----------+------------------------------+-----------------------|
+| Corfu     | ~corfu-auto~ non-nil         | ~completion-at-point~ |
+| Company   | ~company-idle-delay~ non-nil | ~company-complete~    |
+| Default   | N/A (always manual)          | =C-M-i=              |
+
+To suppress SQL keyword/function completion during automatic (idle) completion
+while keeping it available on explicit invocation:
+
+#+begin_src emacs-lisp
+(setq duckdb-query-complete-trigger 'manual)
+#+end_src
+
+With this setting, SQL metadata candidates only appear when you explicitly
+invoke completion. Reference completion (=@type:name=) always activates
+regardless of this setting, since typing =@= is already an explicit action.
+
+*** Customizing Completion Behavior
+
+The completion mode queries DuckDB metadata once at enable time and caches
+approximately 3400 candidates (keywords, functions, types). To refresh after
+loading extensions or attaching databases:
+
+#+begin_src
+M-x duckdb-query-complete-refresh-cache
+#+end_src
+
+To disable SQL metadata completion and keep only reference completion:
+
+#+begin_src emacs-lisp
+(setq duckdb-query-complete-sql-p nil)
+#+end_src
+
+See [[#font-lock-for-reference-syntax][Font Lock for Reference Syntax]] and [[#sql-completion][SQL Completion]] for full documentation.
 * Querying Elisp Data
 :PROPERTIES:
 :CUSTOM_ID: querying-elisp-data
@@ -591,7 +395,7 @@ named ~@data~:
     <th width="500px">Code</th>
     <th width="500px">Result</th></tr>
 <tr><td>
-<pre lang="elisp">(duckdb-query
+<pre lang="emacs-lisp">(duckdb-query
  "SELECT name, score * 1.1 as curved
   FROM @data
   WHERE score > 85"
@@ -599,7 +403,7 @@ named ~@data~:
          ((name . "Bob") (score . 87))
          ((name . "Carol") (score . 72))))</pre>
 </td><td>
-<pre lang="elisp">(((name . "Aly") (curved . 104.5))
+<pre lang="emacs-lisp">(((name . "Aly") (curved . 104.5))
  ((name . "Bob") (curved . 95.7)))</pre>
 </td></tr></table>
 #+end_html
@@ -612,7 +416,7 @@ variables:
     <th width="500px">Code</th>
     <th width="500px">Result</th></tr>
 <tr><td>
-<pre lang="elisp"> (let ((users ;; users table
+<pre lang="emacs-lisp"> (let ((users ;; users table
        '(((id . 1) (name . "Alice"))
          ((id . 2) (name . "Bob"))))
       (orders ;; orders table
@@ -627,7 +431,7 @@ variables:
    :data `((users . ,users)
            (orders . ,orders))))</pre>
 </td><td>
-<pre lang="elisp">
+<pre lang="emacs-lisp">
 (((name . "Alice") (count . 2))
  ((name . "Bob") (count . 1)))
 </pre>
@@ -666,7 +470,7 @@ buffer:
     <th width="500px">Code</th>
     <th width="500px">Result</th></tr>
 <tr><td>
-<pre lang="elisp">(duckdb-query
+<pre lang="emacs-lisp">(duckdb-query
  "SELECT product,
     stock * price as value
   FROM @org:inventory
@@ -697,7 +501,7 @@ Join an org table with Elisp data:
     <th width="500px">Code</th>
     <th width="500px">Result</th></tr>
 <tr><td>
-<pre lang="elisp">(let ((sales '(((sku . "A-100") (qty . 10))
+<pre lang="emacs-lisp">(let ((sales '(((sku . "A-100") (qty . 10))
                ((sku . "A-100") (qty . 5))
                ((sku . "C-300") (qty . 20)))))
   (duckdb-query
@@ -705,11 +509,11 @@ Join an org table with Elisp data:
            SUM(s.qty) as sold,
            i.stock - SUM(s.qty) as remaining
     FROM @org:inventory i
-    JOIN @sales s ON i.sku = s.sku
+    JOIN @data:sales s ON i.sku = s.sku
     GROUP BY i.product, i.stock"
    :data `((sales . ,sales))))</pre>
 </td><td>
-<pre lang="elisp">(((product . "Widget")
+<pre lang="emacs-lisp">(((product . "Widget")
   (sold . 15)
   (remaining . 35))
  ((product . "Gizmo")
@@ -719,17 +523,16 @@ Join an org table with Elisp data:
 #+end_html
 
 Join a remote Parquet file with local Elisp data:
-#+begin_src elisp :results code
- (let ((airports '(((code . "JFK")
-                   (name . "JFK International"))
-                  ((code . "LGA")
-                   (name . "LaGuardia")))))
+
+#+begin_src elisp
+(let ((airports '(((code . "JFK") (name . "JFK International"))
+                  ((code . "LGA") (name . "LaGuardia")))))
   (duckdb-query
    "SELECT a.name,
            COUNT(*) as departures,
            ROUND(AVG(f.dep_delay), 1) as avg_delay
-    FROM 'https://github.com/rfsaldanha/releases/releases/download/v1/flights.parquet' as f
-    JOIN @airports a ON f.origin = a.code
+    FROM 'https://github.com/.../flights.parquet' f
+    JOIN @data:airports a ON f.origin = a.code
     GROUP BY a.name
     ORDER BY departures DESC"
    :data `((airports . ,airports))))
@@ -738,22 +541,463 @@ Join a remote Parquet file with local Elisp data:
 ;;     ((name . "LaGuardia") (departures . 104662) (avg_delay . 10.3)))
 #+end_src
 
+Here's an example combining ~@data~, ~@org~ and ~@val~ in a single query using the
+same ~inventory~ table from the previous section:
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Result</th></tr>
+<tr><td>
+<pre lang="emacs-lisp">;; Using #+NAME: inventory from above
+(let ((sales '(((sku . "A-100") (qty . 15))
+               ((sku . "C-300") (qty . 25)))))
+  (duckdb-query
+   "SELECT i.product,
+           s.qty as sold,
+           s.qty * i.price as revenue
+    FROM @org:inventory i
+    JOIN @data:sales s ON i.sku = s.sku
+    WHERE i.price >= @val:min_price
+    ORDER BY revenue DESC"
+   :data `((sales . ,sales))
+   :val '((min_price . 10))))</pre>
+</td><td>
+<pre lang="emacs-lisp">(((product . "Gizmo")
+  (sold . 25)
+  (revenue . 374.75))
+ ((product . "Widget")
+  (sold . 15)
+  (revenue . 149.85)))</pre>
+</td></tr></table>
+<p align="center"><em>Combining @val, @org and @data references in one query</em></p>
+#+end_html
+
+* Parameterized Queries
+:PROPERTIES:
+:CUSTOM_ID: parameterized-queries
+:END:
+
+The package provides parameterization through the =@type:name= reference pattern.
+All references follow the same syntax but serve different purposes and have
+different safety characteristics.
+
+** Reference Type Summary
+:PROPERTIES:
+:CUSTOM_ID: reference-type-summary
+:END:
+
+| Type   | Syntax              | Parameter | Mechanism                      | Use Case                        |
+|--------+---------------------+-----------+--------------------------------+---------------------------------|
+| =@org:=  | =@org:table=          | --        | Resolve org table to JSON file | Org table data                  |
+|        | =@org:file:table=     |           |                                | Org table from specific file    |
+| =@data:= | =@data:name= or =@name= | =:data=     | Serialize Elisp to JSON file   | Elisp data structures           |
+| =@val:=  | =@val:name=           | =:val=      | =SET VARIABLE= with SQL literal  | Literal values (injection-safe) |
+| =@sql:=  | =@sql:name=           | =:sql=      | Direct text substitution       | Query fragments, identifiers    |
+
+The reference type in your query must match the parameter:
+- =@val:x= requires =x= to be in =:val=
+- =@sql:x= requires =x= to be in =:sql=
+- =@data:x= requires =x= to be in =:data=
+
+Mismatches signal an error with a helpful message indicating which parameter is missing.
+
+** Substitution Order
+
+References are processed in strict order, enabling powerful composition:
+
+1. =@sql:= -- Text substitution first (fragments can contain other reference types)
+2. =@org:= -- Org tables resolved to temp JSON files
+3. =@data:= -- Elisp data serialized to temp JSON files
+4. =@val:= -- Variable bindings generated as =SET VARIABLE= statements
+
+This ordering is critical: =@sql:= fragments can contain =@val:=, =@data:=, and =@org:=
+references that resolve in subsequent passes.
+
+** Variable Binding with =@val:=
+
+The =:val= parameter binds Elisp values as DuckDB session variables. Values are
+converted to SQL literals with proper escaping, making this safe for user input:
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Generated SQL</th></tr>
+<tr><td>
+<pre lang="emacs-lisp">(duckdb-query
+ "SELECT * FROM users
+  WHERE name LIKE @val:pattern
+    AND age >= @val:min_age"
+ :val '((pattern . "%O'Brien%")
+        (min_age . 18)))</pre>
+</td><td>
+<pre lang="sql">SET VARIABLE pattern = '%O''Brien%';
+SET VARIABLE min_age = 18;
+SELECT * FROM users
+WHERE name LIKE getvariable('pattern')
+  AND age >= getvariable('min_age')</pre>
+</td></tr></table>
+#+end_html
+
+Variables support all DuckDB types with automatic conversion:
+
+| Elisp Value          | SQL Generated    | DuckDB Type |
+|----------------------+------------------+-------------|
+| =42=                   | =42=               | INTEGER     |
+| =3.14159=              | =3.14159=          | DOUBLE      |
+| ="O'Brien"=            | ='O''Brien'=       | VARCHAR     |
+| =t=                    | =TRUE=             | BOOLEAN     |
+| =:false=               | =FALSE=            | BOOLEAN     |
+| =:null= or =nil=         | =NULL=             | NULL        |
+| =[1 2 3]=              | =[1, 2, 3]=        | INTEGER[]   |
+| =((a . 1) (b . 2))=    | ={'a': 1, 'b': 2}= | STRUCT      |
+| =(sql "(SELECT ...)")= | =(SELECT ...)=     | (evaluated) |
+
+Bound values are native DuckDB types, enabling struct field access and array operations:
+
+#+begin_src elisp
+;; Struct field access
+(duckdb-query "SELECT @val:person.name AS n, @val:person.age AS a"
+              :val '((person . ((name . "Alice") (age . 30)))))
+;; => (((n . "Alice") (a . 30)))
+
+;; Array operations
+(duckdb-query "SELECT list_sum(@val:nums) AS total, @val:nums[2] AS second"
+              :val '((nums . [10 20 30])))
+;; => (((total . 60) (second . 20)))
+#+end_src
+
+*** Sequential Variable Dependencies
+
+Bindings are processed in declaration order like =let*=. Later bindings can
+reference earlier ones using the =(sql ...)= wrapper:
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Result</th></tr>
+<tr><td>
+<pre lang="emacs-lisp">(duckdb-query
+ "SELECT @val:base AS b,
+         @val:doubled AS d,
+         @val:final AS f"
+ :val '((base . 10)
+        (doubled . (sql "@val:base * 2"))
+        (final . (sql "@val:doubled + @val:base"))))</pre>
+</td><td>
+<pre lang="emacs-lisp">(((b . 10) (d . 20) (f . 30)))</pre>
+</td></tr></table>
+#+end_html
+
+The =(sql ...)= wrapper passes its content through unquoted, enabling DuckDB to
+evaluate expressions. Without the wrapper, strings are quoted as literals.
+
+Out-of-order references signal an error:
+
+#+begin_src elisp
+(duckdb-query "SELECT @val:result"
+              :val '((result . (sql "@val:undefined"))
+                     (undefined . 10)))
+;; Error: @val:result in value references undefined variable 'undefined'
+#+end_src
+
+*** Computed Values from Data
+
+The =(sql ...)= expressions can reference =@data:= bindings, enabling dynamic
+thresholds computed from your data:
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Result</th></tr>
+<tr><td>
+<pre lang="emacs-lisp">(let ((scores
+       '(((name . "Alice") (score . 90))
+         ((name . "Bob") (score . 70))
+         ((name . "Carol") (score . 85)))))
+  (duckdb-query
+   "SELECT * FROM @data:scores
+    WHERE score > @val:threshold"
+   :data `((scores . ,scores))
+   :val '((threshold
+           . (sql "(SELECT AVG(score)
+                    FROM @data:scores)")))))</pre>
+</td><td>
+<pre lang="emacs-lisp">(((name . "Alice") (score . 90)))</pre>
+<p><em>Threshold computed as ~81.67</em></p>
+</td></tr></table>
+#+end_html
+
+*** Reference Validity in =(sql ...)= Wrappers
+
+The =(sql ...)= wrapper can contain =@val:= and =@data:= references. However, =@sql:=
+and =@org:= references inside =(sql ...)= cannot be resolved because =@sql:=
+substitution happens before =:val= processing:
+
+| Reference Type | In =(sql ...)= Wrapper |
+|----------------+----------------------|
+| =@val:name=      | Valid                |
+| =@data:name=     | Valid                |
+| =@sql:name=      | Invalid              |
+| =@org:name=      | Invalid              |
+
+#+begin_quote
+[!IMPORTANT]
+Variables are /scalar/ values. They must resolve to exactly one column and one
+row. Subqueries returning multiple columns or rows will error:
+=Binder Error: Subquery returns 2 columns - expected 1=.
+For table-valued data, use =@data:= bindings instead.
+#+end_quote
+
+** Query Fragment Composition with =@sql:=
+
+The =@sql:= reference performs direct text substitution. Use it for query
+fragments, dynamic identifiers, or computed expressions that cannot be
+parameterized as values:
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Result</th></tr>
+<tr><td>
+<pre lang="emacs-lisp">(duckdb-query
+ "SELECT * FROM (@sql:base_query)
+  WHERE value > @val:threshold"
+ :sql '((base_query .
+         "SELECT n AS id, n * 10 AS value
+          FROM range(1, 6) t(n)"))
+ :val '((threshold . 30)))</pre>
+</td><td>
+<pre lang="emacs-lisp">(((id . 4) (value . 40))
+ ((id . 5) (value . 50)))</pre>
+</td></tr></table>
+#+end_html
+
+*** Fragments Can Contain Other References
+
+Since =@sql:= substitution happens first, fragments can contain =@val:=, =@data:=, and
+=@org:= references that resolve in subsequent passes:
+
+#+begin_src elisp
+(duckdb-query
+ "SELECT * FROM (@sql:filtered_data)"
+ :sql '((filtered_data .
+         "SELECT * FROM @data:users
+          WHERE age > @val:min_age"))
+ :data `((users . ,user-list))
+ :val '((min_age . 21)))
+#+end_src
+
+*** Nested Fragment Substitution
+
+Fragments can reference other fragments, enabling modular query construction:
+
+#+begin_src elisp
+(duckdb-query
+ "SELECT * FROM (@sql:outer)"
+ :sql '((outer . "SELECT x, x*2 AS doubled FROM (@sql:inner)")
+        (inner . "SELECT generate_series AS x FROM generate_series(1, 3)")))
+;; => (((x . 1) (doubled . 2)) ((x . 2) (doubled . 4)) ((x . 3) (doubled . 6)))
+#+end_src
+
+*** Dynamic Identifiers
+
+Table names, column names, and other SQL identifiers cannot be parameterized
+with =@val:= (DuckDB treats them as string literals). Use =@sql:= for dynamic
+identifiers:
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Result</th></tr>
+<tr><td>
+<pre lang="emacs-lisp">(duckdb-query
+ "SELECT @sql:columns
+  FROM @sql:source
+  ORDER BY @sql:sort_col DESC
+  LIMIT @val:n"
+ :sql '((source . "range(1, 100) t(n)")
+        (columns . "n, n * 2 AS doubled")
+        (sort_col . "doubled"))
+ :val '((n . 5)))</pre>
+</td><td>
+<pre lang="emacs-lisp">(((n . 99) (doubled . 198))
+ ((n . 98) (doubled . 196))
+ ((n . 97) (doubled . 194))
+ ((n . 96) (doubled . 192))
+ ((n . 95) (doubled . 190)))</pre>
+</td></tr></table>
+#+end_html
+
+*** Reusable Query Libraries
+
+It's also possible to define fragment libraries for common patterns:
+
+#+begin_src elisp
+(defvar my-query-fragments
+  '((active_users . "SELECT * FROM @data:users WHERE status = 'active'")
+    (recent_orders . "SELECT * FROM @data:orders WHERE date > @val:since")))
+
+(let ((users '(((id . 1) (name . "Alice") (status . "active"))
+               ((id . 2) (name . "Bob") (status . "inactive"))
+               ((id . 3) (name . "Carol") (status . "active"))))
+      (orders '(((id . 101) (user_id . 1) (date . "2024-02-15"))
+                ((id . 102) (user_id . 1) (date . "2024-03-01"))
+                ((id . 103) (user_id . 3) (date . "2024-02-20")))))
+  (duckdb-query
+   "SELECT u.name, COUNT(o.id) as order_count
+    FROM (@sql:active_users) u
+    LEFT JOIN (@sql:recent_orders) o ON u.id = o.user_id
+    GROUP BY u.name"
+   :sql my-query-fragments
+   :data `((users . ,users) (orders . ,orders))
+   :val '((since . "2024-01-01"))))
+;; => (((name . "Alice") (order_count . 2))
+;;     ((name . "Carol") (order_count . 1)))
+#+end_src
+
+** Cross-Reference Interaction Guide
+
+This table summarizes which reference types can contain other reference types:
+
+| Container           | Can contain =@sql:= | Can contain =@data:= | Can contain =@val:= | Can contain =@org:= |
+|---------------------+---------------------+----------------------+---------------------+---------------------|
+| Main query          | Yes                 | Yes                  | Yes                 | Yes                 |
+| =@sql:= fragment    | Yes (nested)        | Yes                  | Yes                 | Yes                 |
+| =@val:= =(sql ...)= | No                  | Yes                  | Yes (earlier only)  | No                  |
+
+
+#+HTML: <img src="https://github.com/gggion/duckdb-query.el/blob/screenshots/duckdb-font-lock-warning-enabled.png?raw=true" align="center" width="100%">
+#+HTML: <p align="center"><em>TIP: Enabling duckdb-query-font-lock-mode will fontify invalid references with the warning face.</em></p>
+
+** Complete Example: All Reference Types
+
+This example demonstrates all binding types working together:
+
+#+begin_src elisp
+(let ((products '(((sku . "A1") (name . "Widget") (price . 29.99))
+                  ((sku . "B2") (name . "Gadget") (price . 49.99))
+                  ((sku . "C3") (name . "Gizmo") (price . 99.99))))
+      (sales '(((sku . "A1") (qty . 10) (region . "West"))
+               ((sku . "B2") (qty . 5) (region . "East"))
+               ((sku . "C3") (qty . 3) (region . "West")))))
+  (duckdb-query
+   "WITH metrics AS (@sql:metrics_cte)
+    SELECT
+      m.region,
+      m.revenue,
+      @val:avg_revenue AS overall_avg,
+      CASE WHEN m.revenue > @val:high_threshold THEN 'High'
+           WHEN m.revenue > @val:avg_revenue THEN 'Medium'
+           ELSE 'Low'
+      END AS performance
+    FROM metrics m
+    ORDER BY m.revenue DESC"
+
+   :sql '((metrics_cte .
+           "SELECT s.region, SUM(s.qty * p.price) AS revenue
+            FROM @data:sales s
+            JOIN @data:products p ON s.sku = p.sku
+            WHERE p.price >= @val:min_price
+            GROUP BY s.region"))
+
+   :data `((products . ,products)
+           (sales . ,sales))
+
+   :val '((min_price . 25)
+          (avg_revenue . (sql "(SELECT AVG(s.qty * p.price)
+                                FROM @data:sales s
+                                JOIN @data:products p ON s.sku = p.sku)"))
+          (high_threshold . (sql "@val:avg_revenue * 1.5")))
+
+   :format :org-table))
+#+end_src
+
+This query:
+- Uses =@sql:metrics_cte= to define a reusable CTE fragment
+- The fragment contains =@data:= and =@val:= references resolved after substitution
+- Computes =avg_revenue= from bound data using =(sql ...)=
+- Derives =high_threshold= from the computed average using sequential dependency
+- Combines all reference types in a single query
 * Output Formats
 :PROPERTIES:
 :CUSTOM_ID: output-formats
 :END:
+#+begin_quote
+[!IMPORTANT]
+NEW in 0.8:  ~:single~, ~:row~, and ~:column~ formats
+#+end_quote
 
 The ~:format~ parameter controls result structure:
 
-| Format       | Structure                 | Use Case                      |
-|--------------+---------------------------+-------------------------------|
+| Format     | Structure                 | Use Case                      |
+|------------+---------------------------+-------------------------------|
 | ~:alist~     | List of alists            | General Elisp processing      |
 | ~:plist~     | List of plists            | Keyword-based access          |
 | ~:hash~      | List of hash-tables       | O(1) field lookup             |
 | ~:vector~    | Vector of alists          | Index-based access            |
 | ~:columnar~  | Alist of column vectors   | Numerical analysis            |
 | ~:org-table~ | List of lists with header | Display, org-mode integration |
+| ~:single~    | Scalar value              | COUNT, MAX, single lookups    |
+| ~:row~       | Single alist              | Single record extraction      |
+| ~:column~    | List of values            | Single column extraction      |
 | ~:raw~       | JSON string               | Custom parsing                |
+
+The ~:single~, ~:row~, and ~:column~ formats enforce cardinality:
+
+#+begin_html
+<table align="center"><tr>
+    <th width="500px">Code</th>
+    <th width="500px">Result</th></tr>
+<tr><td>
+<pre lang="emacs-lisp">;; :single errors on multiple rows/columns
+(duckdb-query
+ "SELECT 1, 2" :format :single)</pre>
+</td><td>
+<pre lang="emacs-lisp">;; Error: Query returned 2 columns,
+;; expected 1 for :single format</pre>
+</td></tr>
+
+<!-- spacing -->
+<tr></tr>
+
+<tr><td>
+<pre lang="emacs-lisp">;; :row errors on multiple rows
+(duckdb-query
+ "SELECT * FROM range(3) t(n)"
+ :format :row)</pre>
+</td><td>
+<pre lang="emacs-lisp">;; Error: Query returned 3 rows,
+;; expected 1 for :row format</pre>
+</td></tr>
+
+<!-- spacing -->
+<tr></tr>
+
+<tr><td>
+<pre lang="emacs-lisp">;; :column takes first column silently
+(duckdb-query
+ "SELECT n, n*2 FROM range(3) t(n)"
+ :format :column)</pre>
+</td><td>
+<pre lang="emacs-lisp">(0 1 2)</pre>
+</td></tr></table>
+#+end_html
+
+These cardinality checks catch logic bugs early like if you expect one row but
+get three, something is wrong with your query or assumptions.
+
+Additionally, the convenience functions ~duckdb-query-value~, ~duckdb-query-row~,
+and ~duckdb-query-column~ provide the same extraction without ~:format~:
+
+#+begin_src elisp
+(duckdb-query-value "SELECT COUNT(*) FROM range(100)")
+;; => 100
+(duckdb-query-row "SELECT name:'Alice', score:95")
+;; => ((name . "Alice") (score . 95))
+(duckdb-query-column "SELECT unnest([1,2,3])")
+;; => (1 2 3)
+#+end_src
 
 * Schema Introspection
 :PROPERTIES:
@@ -775,58 +1019,88 @@ Discover structure before querying:
 ;;     "air_time" "distance" "hour" "minute" "time_hour")
 #+end_src
 
+#+begin_src elisp :results code :exports both
+(duckdb-query-describe "SELECT 1 as id, 'text' as name")
+;; => (((column_name . "id") (column_type . "INTEGER") (null . "YES") ...)
+;;     ((column_name . "name") (column_type . "VARCHAR") (null . "YES") ...))
+#+end_src
+
 * Database Persistence
-#+begin_quote
-[!TIP]
-*New in 0.7.0*: ~duckdb-query-with-database~ accepts an optional spec list for
-additional options.  Both =(duckdb-query-with-database "path" ...)= and
-=(duckdb-query-with-database '("path" :readonly t) ...)= are supported.
-#+end_quote
+:PROPERTIES:
+:CUSTOM_ID: database-persistence
+:END:
 
 For workflows requiring state across queries, bind a database file:
 
-#+begin_html
-<table align="center"><tr>
-    <th width="500px">Code</th>
-    <th width="500px">Result</th></tr>
-<tr><td>
-<pre lang="elisp">(duckdb-query-with-transient-database
+#+begin_src elisp :results code
+(duckdb-query-with-transient-database
   (duckdb-query
    "CREATE TABLE events (id INT, name TEXT)")
   (duckdb-query
    "INSERT INTO events VALUES
     (1, 'click'), (2, 'scroll')")
-  (duckdb-query "SELECT * FROM events"))</pre>
-</td><td>
-<pre lang="elisp">(((id . 1) (name . "click"))
- ((id . 2) (name . "scroll")))</pre>
-</td></tr></table>
-#+end_html
-
-~duckdb-query-with-transient-database~ creates a temporary file deleted after the
-block. Use ~duckdb-query-with-database~ for persistent files:
-
-#+begin_src elisp
-(duckdb-query-with-database '("analytics.duckdb")
-  (duckdb-query "SELECT COUNT(*) FROM events"))
+  (duckdb-query "SELECT * FROM events"))
+;; => (((id . 1) (name . "click"))
+;;     ((id . 2) (name . "scroll")))
 #+end_src
 
-The spec list accepts keyword options:
+~duckdb-query-with-transient-database~ creates a temporary file deleted after the
+block.  Use ~duckdb-query-with-database~ for persistent files:
 
-#+begin_src elisp
-;; Open read-only to prevent write conflicts
-(duckdb-query-with-database '("/shared/data.db" :readonly t)
-  (duckdb-query "SELECT * FROM reports"))
+#+begin_src elisp :results code
+(duckdb-query-with-database "analytics.duckdb"
+  (duckdb-query "CREATE TABLE events (id INT, name TEXT)")
+  (duckdb-query "INSERT INTO events VALUES (1, 'click')")
+  (duckdb-query "SELECT * FROM events"))
+;; => (((id . 1) (name . "click")))
+#+end_src
 
+Databases open in writable mode by default.  For read-only access, pass a spec
+list with ~:readonly t~:
+
+#+begin_src elisp :results code
+;; Open existing database read-only (prevents accidental writes)
+(duckdb-query-with-database '("analytics.duckdb" :readonly t)
+  (duckdb-query "SELECT * FROM events"))
+#+end_src
+
+#+BEGIN_quote
+[!WARNING]
+When a database path does not exist, DuckDB creates it automatically in
+writable mode.  This means ~:database "new.db"~ or
+~duckdb-query-with-database "new.db"~ will create the file as a side
+effect.  Use ~:readonly t~ to prevent accidental creation -- DuckDB
+signals an error if the file does not exist in read-only mode.
+#+end_quote
+
+The spec list supports variable paths:
+
+#+begin_src elisp :results code
 ;; With variable path
 (let ((db-path "~/project/app.db"))
   (duckdb-query-with-database `(,db-path)
     (duckdb-query "SELECT * FROM users")))
+
+;; Read-only with variable path
+(let ((db-path "~/project/app.db"))
+  (duckdb-query-with-database `(,db-path :readonly t)
+    (duckdb-query "SELECT * FROM users")))
 #+end_src
 
-These macros work with CLI execution. For persistent processes with lower
-latency, see "Session-Based Execution" below.
+The bare ~:database~ parameter in ~duckdb-query~ also defaults to writable:
+
+#+begin_src elisp :results code
+;; Direct parameter -- also writable
+(duckdb-query "SELECT * FROM logs" :database "app.db")
+#+end_src
+
+These macros work with CLI execution.  For persistent processes with lower
+latency, see [[#session-based-execution][Session-Based Execution]] below.
+
 * Session-Based Execution
+:PROPERTIES:
+:CUSTOM_ID: session-based-execution
+:END:
 For repeated queries or workflows requiring persistent state, sessions eliminate
 DuckDB process spawn overhead (~10-20ms per query). A session maintains a
 long-running DuckDB process with its own temporary database:
@@ -916,7 +1190,7 @@ For manual control, use ~duckdb-query-session-attach~ and ~duckdb-query-session-
 ~duckdb-query-with-transient-database~ also adapts to session context:
 
 #+begin_src elisp :results code
-(duckdb-query-with-session "work"
+(duckdb-query-with-transient-session "work"
   (duckdb-query "CREATE TABLE permanent AS SELECT 'stays' as val")
 
   (duckdb-query-with-transient-database
@@ -928,6 +1202,11 @@ For manual control, use ~duckdb-query-session-attach~ and ~duckdb-query-session-
   ;; Back to session context, scratch is gone
   (duckdb-query-value "SELECT val FROM permanent"))
 ;; => "stays"
+#+end_src
+
+#+RESULTS:
+#+begin_src elisp
+"stays"
 #+end_src
 
 ** Session Management
@@ -955,24 +1234,59 @@ Session initialization commands run when sessions start:
 :CUSTOM_ID: nested-types
 :END:
 
-DuckDB supports STRUCT, LIST, MAP, and ARRAY types. These serialize correctly as
-nested Elisp structures:
+DuckDB supports STRUCT, LIST, MAP, and ARRAY types. The default file-based
+output mode serializes these correctly as nested Elisp structures:
 
 #+begin_html
 <table align="center"><tr>
     <th width="500px">Code</th>
     <th width="500px">Result</th></tr>
 <tr><td>
-<pre lang="elisp">(duckdb-query
+<pre lang="emacs-lisp">(duckdb-query
  "SELECT
     {'x': 1, 'y': 2}::STRUCT(x INT, y INT)
     as point")
 </pre>
 </td><td>
-<pre lang="elisp">(((point (x . 1) (y . 2))))</pre>
+<pre lang="emacs-lisp">(((point (x . 1) (y . 2))))</pre>
 </td></tr>
+
+<!-- spacing -->
+<tr></tr>
+
 <tr><td>
-<pre lang="elisp">;; Nested data survives roundtrips
+<pre lang="emacs-lisp">;; Arrays become Elisp lists
+(duckdb-query
+ "SELECT [1, 2, 3] as nums,
+         ['a', 'b'] as letters")</pre>
+</td><td>
+<pre lang="emacs-lisp">(((nums 1 2 3)
+  (letters "a" "b")))</pre>
+</td></tr>
+
+<!-- spacing -->
+<tr></tr>
+
+<tr><td>
+<pre lang="emacs-lisp">;; Nested structs
+(duckdb-query
+ "SELECT
+    {'person':
+      {'name': 'Alice', 'age': 30},
+     'active': true}
+    as record")</pre>
+</td><td>
+<pre lang="emacs-lisp">(((record
+   (person (name . "Alice")
+           (age . 30))
+   (active . t))))</pre>
+</td></tr>
+
+<!-- spacing -->
+<tr></tr>
+
+<tr><td>
+<pre lang="emacs-lisp">;; Nested data survives roundtrips
 (let ((data
        '(((id . 1) (loc (x . 10) (y . 20)))
          ((id . 2) (loc (x . 30) (y . 40))))))
@@ -981,11 +1295,37 @@ nested Elisp structures:
     FROM @data"
    :data data))</pre>
 </td><td>
-<pre lang="elisp">(((id . 1) (sum . 30))
+<pre lang="emacs-lisp">(((id . 1) (sum . 30))
  ((id . 2) (sum . 70)))</pre>
-</td></tr></table>
+</td></tr>
+</table>
 #+end_html
 
+** Pipe Mode and =:preserve-nested=
+
+When using =:output-via :pipe= (streaming mode) or session execution for DDL
+fallback, nested types serialize as DuckDB's string representation instead of
+proper JSON. The =:preserve-nested= parameter wraps nested columns with
+=to_json()= to restore correct serialization:
+
+#+begin_src elisp
+;; Without :preserve-nested in pipe mode
+(duckdb-query "SELECT {'x': 1}::STRUCT(x INT) as s"
+              :output-via :pipe)
+;; => (((s . "{'x': 1}")))  ; String representation
+
+;; With :preserve-nested
+(duckdb-query "SELECT {'x': 1}::STRUCT(x INT) as s"
+              :output-via :pipe
+              :preserve-nested t)
+;; => (((s (x . 1))))  ; Proper nested structure
+#+end_src
+
+The default =:output-via :file= mode handles nested types correctly without
+=:preserve-nested=. Use =:preserve-nested= when:
+- Explicitly requesting =:output-via :pipe=
+- Inside session scope where DDL statements force pipe fallback
+- Roundtripping nested data through =@data:= bindings after pipe-mode queries
 * Performance
 :PROPERTIES:
 :CUSTOM_ID: performance
@@ -1010,7 +1350,9 @@ Profile your specific queries with the benchmark module:
     <th width="500px">Code</th>
     <th width="500px">Result</th></tr>
 <tr><td>
-<pre lang="elisp">(duckdb-query-bench-output-strategies
+<pre lang="emacs-lisp">
+(require 'duckdb-query-bench)
+(duckdb-query-bench-output-strategies
  "SELECT * FROM range(10000) t(i)"
  :iterations 3)</pre>
 </td><td>
@@ -1026,6 +1368,153 @@ Other benchmark functions: ~duckdb-query-bench-formats~ (compare output formats)
 ~duckdb-query-bench-nested-types~ (compare nested type handling),
 ~duckdb-query-bench-data-formats~ (compare ~:data~ serialization).
 
+#+begin_quote
+[!NOTE]
+I'm in the process of adding more benchmark utilities geared towards measuring performance for parameterized queries.
+#+end_quote
+
+* Font Lock for Reference Syntax
+:PROPERTIES:
+:CUSTOM_ID: font-lock-for-reference-syntax
+:END:
+
+The =duckdb-query-font-lock-mode= minor mode highlights =@type:name= references
+inside SQL strings passed to =duckdb-query=, =duckdb-query-value=,
+=duckdb-query-row=, and =duckdb-query-column=.
+
+References are highlighted only within recognized function calls, not in
+docstrings, comments, or other string contexts. When added to
+=emacs-lisp-mode-hook=, the mode also activates in org-mode src blocks with
+lightweight overhead (keywords only, no preset application or region extension
+hooks).
+#+HTML: <img src="https://github.com/gggion/duckdb-query.el/blob/screenshots/duckdb-font-lock-enabled.png?raw=true" align="center" width="100%">
+
+Invalid references are highlighted with a warning face. This'll apply to names
+not found in the corresponding =:sql=, =:data=, or =:val= parameter, and also to
+references which are not compatible inside one another (for more info, see [[#reference-type-summary][Reference Type Summary]]).
+
+#+HTML: <img src="https://github.com/gggion/duckdb-query.el/blob/screenshots/duckdb-font-lock-warning-enabled.png?raw=true" align="center" width="100%">
+
+** Preset Selection
+
+Nine highlighting presets are available. Select interactively with live preview:
+
+#+begin_src
+M-x duckdb-query-font-lock-select-preset
+#+end_src
+
+#+HTML: <img src="https://github.com/gggion/duckdb-query.el/blob/screenshots/duckdb-query-1_2180x2220.gif?raw=true" align="center" width="100%">
+Or set directly:
+
+#+begin_src emacs-lisp
+(setq duckdb-query-font-lock-preset 'shadow-bold-constant)  ; default
+;; Other presets: shadow-bold-variable, keyword-variable, uniform-type,
+;; uniform-keyword, italic-shadow-bold-constant, light-extra-bold,
+;; shadow-completions, italic-shadow-bold-underline
+#+end_src
+
+** Custom Faces
+
+For fine-grained control, customize the faces directly:
+
+- ~duckdb-query-reference-prefix-face~: The =@type:= portion
+- ~duckdb-query-reference-name-face~: The =name= portion
+- ~duckdb-query-reference-invalid-face~: Undefined or invalid references
+
+#+begin_src emacs-lisp
+(set-face-attribute 'duckdb-query-reference-prefix-face nil
+                    :inherit 'shadow :slant 'italic)
+(set-face-attribute 'duckdb-query-reference-name-face nil
+                    :inherit 'font-lock-constant-face :weight 'bold)
+#+end_src
+
+* SQL Completion
+:PROPERTIES:
+:CUSTOM_ID: sql-completion
+:END:
+
+The =duckdb-query-complete-mode= minor mode provides completion-at-point inside
+SQL string arguments to =duckdb-query= and related functions. It works with
+corfu, company-mode, and the default completion UI.
+
+Three completion contexts activate depending on cursor position within a SQL
+string:
+
+- Reference Completion ::
+
+Typing =@= triggers reference type completion, offering =sql:=, =data:=, =val:=,
+and =org:= as candidates with descriptions. After selecting a type (or typing it
+manually), the completion system reads binding names from the corresponding
+parameter in the same =duckdb-query= form.
+
+#+HTML: <img src="https://github.com/gggion/duckdb-query.el/blob/screenshots/duckdb-complete-example_2000x1800.gif?raw=true" align="center" width="100%">
+
+Reference completion is exclusive: when active, other completion sources do not
+contribute conflicting candidates.
+
+- SQL Keyword, Function, and Type Completion ::
+
+Outside of =@type:= contexts, the mode completes SQL keywords, functions, and
+data types from cached DuckDB metadata. The cache populates once at mode enable
+by querying =duckdb_keywords()=, =duckdb_functions()=, and =duckdb_types()=,
+providing approximately 3400 candidates with zero per-keystroke latency.
+
+#+HTML: <img src="https://github.com/gggion/duckdb-query.el/blob/screenshots/duckdb-sql-completion_2000x1800.gif?raw=true" align="center" width="100%">
+
+Both uppercase and lowercase variants are generated for SQL keywords, so
+completion works regardless of typing case.
+
+Candidates are annotated with category labels:
+
+| Label     | Meaning                  |
+|-----------+--------------------------|
+| =kw*=     | Reserved SQL keyword     |
+| =kw=      | Unreserved SQL keyword   |
+| =fn=      | Scalar function          |
+| =fn/a=    | Aggregate function       |
+| =fn/m=    | SQL macro                |
+| =fn->T=   | Table-producing function |
+| =fn/m->T= | Table-producing macro    |
+| =pragma=  | Pragma function          |
+| =type=    | Data type                |
+
+Reserved keywords sort before other candidates.
+
+After loading extensions or attaching databases that add new functions or types:
+
+#+begin_src
+M-x duckdb-query-complete-refresh-cache
+#+end_src
+
+To disable SQL metadata completion entirely and keep only reference completion:
+
+#+begin_src emacs-lisp
+(setq duckdb-query-complete-sql-p nil)
+#+end_src
+
+See [[#font-lock-for-reference-syntax][Font Lock for Reference Syntax]] and [[#sql-completion][SQL Completion]] for full documentation.
+
+- Org-Mode Src Blocks ::
+In org-mode, the completion mode narrows to the current =emacs-lisp= or
+=elisp= src block body and switches to ~emacs-lisp-mode-syntax-table~
+before parsing. This ensures correct syntax context and avoids scanning the
+entire org buffer. Completion only activates when point is inside a recognized
+src block.
+
+** Static Analysis Candidates
+
+The completion system also extracts candidates from the SQL string being edited,
+without querying DuckDB:
+
+- CTE names from =WITH name AS= patterns
+- Table aliases from =FROM table alias= and =JOIN table alias= patterns
+- =@data:= binding names as table-like candidates
+
+#+HTML: <img src="https://github.com/gggion/duckdb-query.el/blob/screenshots/duckdb-cte-completion_1920x1080.gif?raw=true" align="center" width="100%">
+
+These candidates sort above DuckDB metadata, so query-specific identifiers
+appear first. They carry their own category labels (=cte=, =alias=, =data=) for
+identification.
 * Acknowledgements
 :PROPERTIES:
 :CUSTOM_ID: acknowledgements
@@ -1054,8 +1543,8 @@ Other benchmark functions: ~duckdb-query-bench-formats~ (compare output formats)
 :END:
 
 #+begin_quote
-[!WARNING]
-UNDER CONSTRUCTION
+[!NOTE]
+The patterns below are stable APIs, but the abstractions built on them are still evolving.
 #+end_quote
 
 As mentioned before, sessions allow low-latency, fast response times, going as
