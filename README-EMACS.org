@@ -625,6 +625,16 @@ substitution happens before =:val= processing:
 #+begin_quote
 [!IMPORTANT]
 Variables are /scalar/ values. They must resolve to exactly one column and one
+row, single value variables are also valid, for example a single url string or a
+number.
+
+Subqueries returning multiple columns or rows will error: =Binder Error:
+Subquery returns 2 columns - expected 1=. For table-valued data, use =@data:=
+bindings instead.
+#+end_quote
+
+[!IMPORTANT]
+Variables are /scalar/ values. They must resolve to exactly one column and one
 row. Subqueries returning multiple columns or rows will error:
 =Binder Error: Subquery returns 2 columns - expected 1=.
 For table-valued data, use =@data:= bindings instead.
@@ -1354,7 +1364,7 @@ implementation of duckdb-query. I would like to credit:
 - [[https://github.com/abo-abo/lispy][lispy]] by Oleh Krehel: The parser's use of [[https://www.gnu.org/software/emacs/manual/html_node/elisp/Position-Parse.html#index-syntax_002dppss][syntax-ppss]] for structural analysis
   of Elisp forms was learned from studying lispy's implementation.
 
-- 
+-
 
 * Related Packages
 :PROPERTIES:

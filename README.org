@@ -744,9 +744,12 @@ substitution happens before =:val= processing:
 #+begin_quote
 [!IMPORTANT]
 Variables are /scalar/ values. They must resolve to exactly one column and one
-row. Subqueries returning multiple columns or rows will error:
-=Binder Error: Subquery returns 2 columns - expected 1=.
-For table-valued data, use =@data:= bindings instead.
+row, single value variables are also valid, for example a single url string or a
+number.
+
+Subqueries returning multiple columns or rows will error: =Binder Error:
+Subquery returns 2 columns - expected 1=. For table-valued data, use =@data:=
+bindings instead.
 #+end_quote
 
 ** Query Fragment Composition with =@sql:=
