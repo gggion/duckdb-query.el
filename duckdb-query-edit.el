@@ -72,27 +72,32 @@ Uses `duckdb-query--parse-params' for structural extraction."
   (let ((params (duckdb-query--parse-params form-beg form-end)))
     (cl-find-if (lambda (p) (eq (plist-get p :key) keyword)) params)))
 
-;;;; Primitive: Locate Parameter
+;;;; Primitive: Insert Binding
 
-(defun duckdb-query-edit--insert-new-param (form-end keyword name value)
-  "Insert new KEYWORD parameter with binding (NAME . VALUE).
+(defun duckdb-query-edit--insert-binding (form-beg form-end keyword name value)
+  "Insert binding (NAME . VALUE) into KEYWORD parameter of enclosing form.
 
-FORM-END is position after closing paren of form.
+FORM-BEG and FORM-END delimit the `duckdb-query' form.
 KEYWORD is :val, :sql, or :data.
-NAME is binding name string.
-VALUE is Elisp literal string.
+NAME is binding name as string.
+VALUE is binding value as string (Elisp literal representation).
 
-Insert before the closing parenthesis of the `duckdb-query' form.
-Return position after inserted text."
-  (save-excursion
-    (goto-char (1- form-end))
-    (let* ((form-col (save-excursion
-                       (backward-up-list 1)
-                       (current-column)))
-           (indent (make-string (+ form-col 14) ?\s)))
-      (insert "\n" indent (symbol-name keyword)
-              " '((" name " . " value "))")
-      (point))))
+If KEYWORD parameter exists, append (NAME . VALUE) to its alist.
+If KEYWORD parameter does not exist, insert it before the closing
+parenthesis of the form.
+
+For :val, VALUE is an Elisp literal (e.g., \"\\\"path/to/file\\\"\").
+For :sql, VALUE is a quoted string (e.g., \"\\\"SELECT * FROM t\\\"\").
+For :data, VALUE is an Elisp data expression.
+
+Return position after inserted text.
+
+Caller is responsible for proper VALUE formatting.
+Uses `duckdb-query-edit--find-param' for parameter location."
+  (let ((param (duckdb-query-edit--find-param form-beg form-end keyword)))
+    (if param
+        (duckdb-query-edit--append-to-param param name value)
+      (duckdb-query-edit--insert-new-param form-end keyword name value))))
 
 (defun duckdb-query-edit--find-last-binding-end (val-beg val-end)
   "Find position after last binding entry in alist between VAL-BEG and VAL-END.
@@ -133,6 +138,26 @@ VAL-END is position after the entire value form."
                 (setq last-entry-end (point))))
             last-entry-end))))))
 
+(defun duckdb-query-edit--append-to-param (param name value)
+  "Append binding (NAME . VALUE) to existing PARAM alist.
+
+PARAM is plist from `duckdb-query-edit--find-param'.
+NAME is binding name string.
+VALUE is Elisp literal string.
+
+Insert after the last binding entry in the alist.
+Return position after inserted text."
+  (let* ((val-beg (plist-get param :val-beg))
+         (val-end (plist-get param :val-end))
+         (last-end (duckdb-query-edit--find-last-binding-end val-beg val-end)))
+    (unless last-end
+      (user-error "Cannot parse parameter alist structure"))
+    (save-excursion
+      (goto-char last-end)
+      (let ((indent (duckdb-query-edit--param-indent param)))
+        (insert "\n" indent "(" name " . " value ")")
+        (point)))))
+
 (defun duckdb-query-edit--param-indent (param)
   "Compute indentation string for bindings inside PARAM.
 
@@ -153,25 +178,25 @@ bindings, or reasonable default based on parameter position."
                        1)
                    ?\s))))
 
-(defun duckdb-query-edit--append-to-param (param name value)
-  "Append binding (NAME . VALUE) to existing PARAM alist."
-  (let* ((val-beg (plist-get param :val-beg))
-         (val-end (plist-get param :val-end))
-         (last-end (duckdb-query-edit--find-last-binding-end val-beg val-end)))
-    (unless last-end
-      (user-error "Cannot parse parameter alist structure"))
-    (save-excursion
-      (goto-char last-end)
-      (let ((indent (duckdb-query-edit--param-indent param)))
-        (insert "\n" indent "(" name " . " value ")")
-        (point)))))
+(defun duckdb-query-edit--insert-new-param (form-end keyword name value)
+  "Insert new KEYWORD parameter with binding (NAME . VALUE).
 
-(defun duckdb-query-edit--insert-binding (form-beg form-end keyword name value)
-  "Insert binding (NAME . VALUE) into KEYWORD parameter of enclosing form."
-  (let ((param (duckdb-query-edit--find-param form-beg form-end keyword)))
-    (if param
-        (duckdb-query-edit--append-to-param param name value)
-      (duckdb-query-edit--insert-new-param form-end keyword name value))))
+FORM-END is position after closing paren of form.
+KEYWORD is :val, :sql, or :data.
+NAME is binding name string.
+VALUE is Elisp literal string.
+
+Insert before the closing parenthesis of the `duckdb-query' form.
+Return position after inserted text."
+  (save-excursion
+    (goto-char (1- form-end))
+    (let* ((form-col (save-excursion
+                       (backward-up-list 1)
+                       (current-column)))
+           (indent (make-string (+ form-col 14) ?\s)))
+      (insert "\n" indent (symbol-name keyword)
+              " '((" name " . " value "))")
+      (point))))
 
 
 (provide 'duckdb-query-edit)
