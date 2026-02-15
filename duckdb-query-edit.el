@@ -94,6 +94,65 @@ Return position after inserted text."
               " '((" name " . " value "))")
       (point))))
 
+(defun duckdb-query-edit--find-last-binding-end (val-beg val-end)
+  "Find position after last binding entry in alist between VAL-BEG and VAL-END.
+
+Navigate into the quoted alist structure and locate the closing
+parenthesis of the last cons cell.  Return position after that
+paren, or nil if structure is not recognized.
+
+VAL-BEG is position of the quote or backquote before the alist.
+VAL-END is position after the entire value form."
+  (ignore val-end)
+  (save-excursion
+    (goto-char val-beg)
+    ;; Skip quote/backquote
+    (when (memq (char-after) '(?' ?`))
+      (forward-char 1))
+    ;; Now at opening paren of alist
+    (when (eq (char-after) ?\()
+      (let ((list-start (point))
+            (list-end (save-excursion
+                        (when (duckdb-query--forward-sexp-safe)
+                          (point)))))
+        (when list-end
+          ;; Walk forward through the alist entries to find last one
+          (goto-char list-start)
+          (forward-char 1)
+          (let ((last-entry-end nil))
+            (while (< (point) (1- list-end))
+              (duckdb-query--skip-whitespace-and-comments)
+              ;; Skip unquote markers
+              (when (eq (char-after) ?,)
+                (forward-char 1)
+                (when (eq (char-after) ?@)
+                  (forward-char 1)))
+              (duckdb-query--skip-whitespace-and-comments)
+              (when (and (< (point) (1- list-end))
+                         (duckdb-query--forward-sexp-safe))
+                (setq last-entry-end (point))))
+            last-entry-end))))))
+
+(defun duckdb-query-edit--param-indent (param)
+  "Compute indentation string for bindings inside PARAM.
+
+PARAM is plist from `duckdb-query-edit--find-param'.
+Return whitespace string matching the indentation of existing
+bindings, or reasonable default based on parameter position."
+  (save-excursion
+    (goto-char (plist-get param :val-beg))
+    ;; Skip quote/backquote and opening paren to find first binding
+    (skip-chars-forward "'`(")
+    (if (eq (char-after) ?\()
+        ;; At first binding's opening paren
+        (make-string (current-column) ?\s)
+      ;; Fallback: indent relative to keyword
+      (make-string (+ (save-excursion
+                         (goto-char (plist-get param :key-beg))
+                         (current-column))
+                       1)
+                   ?\s))))
+
 
 
 
