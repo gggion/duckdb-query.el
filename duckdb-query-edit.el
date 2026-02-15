@@ -173,9 +173,9 @@ bindings, or reasonable default based on parameter position."
         (make-string (current-column) ?\s)
       ;; Fallback: indent relative to keyword
       (make-string (+ (save-excursion
-                         (goto-char (plist-get param :key-beg))
-                         (current-column))
-                       1)
+                        (goto-char (plist-get param :key-beg))
+                        (current-column))
+                      1)
                    ?\s))))
 
 (defun duckdb-query-edit--insert-new-param (form-end keyword name value)
@@ -201,4 +201,61 @@ Return position after inserted text."
 
 (provide 'duckdb-query-edit)
 
+;;;; Internal: Replace with Reference
+
+(defun duckdb-query-edit--replace-with-ref (beg end ref-type name)
+  "Replace text between BEG and END with @REF-TYPE:NAME reference.
+
+BEG and END delimit the text to replace (inside a string).
+REF-TYPE is :val, :sql, or :data.
+NAME is reference name string.
+
+Return position after inserted reference."
+  (let ((ref-string (format (cdr (assq ref-type
+                                       duckdb-query-edit--ref-format-alist))
+                            name)))
+    (save-excursion
+      (goto-char beg)
+      (delete-region beg end)
+      (insert ref-string)
+      (point))))
+
+;;;; Value Formatting
+
+(defun duckdb-query-edit--format-value (text ref-type)
+  "Format extracted TEXT as Elisp literal for REF-TYPE binding.
+
+TEXT is the raw string extracted from the SQL query.
+REF-TYPE is :val, :sql, or :data.
+
+For :val, strip surrounding SQL single-quotes if present and
+produce an Elisp string literal.  Numeric strings are left as
+numbers.
+
+For :sql, wrap in double quotes as Elisp string literal.
+
+For :data, return TEXT as-is (caller provides Elisp expression).
+
+Return formatted string suitable for insertion as binding value."
+  (pcase ref-type
+    (:val
+     (let ((stripped (if (and (>= (length text) 2)
+                              (eq (aref text 0) ?')
+                              (eq (aref text (1- (length text))) ?'))
+                         (substring text 1 -1)
+                       text)))
+       (cond
+        ;; Integer
+        ((string-match-p "\\`-?[0-9]+\\'" stripped)
+         stripped)
+        ;; Float
+        ((string-match-p "\\`-?[0-9]*\\.[0-9]+\\'" stripped)
+         stripped)
+        ;; String
+        (t
+         (format "%S" stripped)))))
+    (:sql
+     (format "%S" text))
+    (:data
+     text)))
 ;;; duckdb-query-edit.el ends here
