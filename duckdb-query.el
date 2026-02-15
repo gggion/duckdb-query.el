@@ -2128,12 +2128,15 @@ Also see `duckdb-query--substitute-var-refs' for variable setup."
 
 SQL-BINDINGS is alist of (name . sql-fragment) pairs.
 Each @sql:NAME reference is replaced with the corresponding fragment.
-Users should wrap references in parentheses when used as subqueries:
-  FROM (@sql:base)  =>  FROM (SELECT * FROM users)
+
+Substitution iterates until no @sql: references remain, resolving
+nested fragment references regardless of declaration order.
+
+Signals `user-error' if @sql:NAME appears but NAME is not in
+SQL-BINDINGS.  Signals `user-error' if iteration limit is exceeded,
+indicating circular references.
 
 Returns modified query string.
-
-Signals =user-error' if @sql:NAME appears but NAME is not in SQL-BINDINGS.
 
 Example:
   (duckdb-query--substitute-sql-refs
@@ -2141,29 +2144,39 @@ Example:
    \\='((base . \"SELECT id, name FROM users\")))
   => \"SELECT * FROM (SELECT id, name FROM users) WHERE x > 1\"
 
-Called by =duckdb-query' before other reference substitutions."
+Called by `duckdb-query' before other reference substitutions."
   (let ((result query)
-        (sql-ref-pattern "@sql:\\([a-zA-Z_][a-zA-Z0-9_]*\\)"))
-    ;; Collect all @sql: references first to validate
-    (let ((refs nil)
-          (temp-query query))
-      (while (string-match sql-ref-pattern temp-query)
-        (push (intern (match-string 1 temp-query)) refs)
-        (setq temp-query (substring temp-query (match-end 0))))
-      ;; Validate all references exist in bindings
-      (dolist (ref (nreverse refs))
-        (unless (assq ref sql-bindings)
-          (user-error "@sql:%s in query but '%s' not found in :sql parameter"
-                      ref ref))))
-    ;; Perform substitutions - direct text replacement, no wrapping
-    (dolist (binding sql-bindings)
-      (let* ((name (symbol-name (car binding)))
-             (fragment (cdr binding))
-             (pattern (format "@sql:%s\\b" (regexp-quote name))))
-        (setq result (replace-regexp-in-string
-                      pattern
-                      fragment
-                      result t t))))
+        (sql-ref-pattern "@sql:\\([a-zA-Z_][a-zA-Z0-9_]*\\)")
+        (max-iterations (1+ (length sql-bindings)))
+        (iteration 0))
+    ;; Iteratively substitute until no @sql: references remain.
+    ;; Each pass may reveal new references from spliced fragments.
+    (while (and (< iteration max-iterations)
+                (string-match-p sql-ref-pattern result))
+      (cl-incf iteration)
+      ;; Validate all current references exist in bindings
+      (let ((temp-query result)
+            (refs nil))
+        (while (string-match sql-ref-pattern temp-query)
+          (push (intern (match-string 1 temp-query)) refs)
+          (setq temp-query (substring temp-query (match-end 0))))
+        (dolist (ref (nreverse refs))
+          (unless (assq ref sql-bindings)
+            (user-error "@sql:%s in query but '%s' not found in :sql parameter"
+                        ref ref))))
+      ;; Perform one pass of substitutions
+      (dolist (binding sql-bindings)
+        (let* ((name (symbol-name (car binding)))
+               (fragment (cdr binding))
+               (pattern (format "@sql:%s\\b" (regexp-quote name))))
+          (setq result (replace-regexp-in-string
+                        pattern
+                        fragment
+                        result t t)))))
+    ;; Check for unresolved references after all iterations
+    (when (string-match-p sql-ref-pattern result)
+      (user-error "Circular @sql: references detected; resolution did not converge after %d iterations"
+                  max-iterations))
     result))
 
 
