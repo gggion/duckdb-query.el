@@ -72,6 +72,31 @@ Uses `duckdb-query--parse-params' for structural extraction."
   (let ((params (duckdb-query--parse-params form-beg form-end)))
     (cl-find-if (lambda (p) (eq (plist-get p :key) keyword)) params)))
 
+;;;; Primitive: Locate Parameter
+
+(defun duckdb-query-edit--insert-new-param (form-end keyword name value)
+  "Insert new KEYWORD parameter with binding (NAME . VALUE).
+
+FORM-END is position after closing paren of form.
+KEYWORD is :val, :sql, or :data.
+NAME is binding name string.
+VALUE is Elisp literal string.
+
+Insert before the closing parenthesis of the `duckdb-query' form.
+Return position after inserted text."
+  (save-excursion
+    (goto-char (1- form-end))
+    (let* ((form-col (save-excursion
+                       (backward-up-list 1)
+                       (current-column)))
+           (indent (make-string (+ form-col 14) ?\s)))
+      (insert "\n" indent (symbol-name keyword)
+              " '((" name " . " value "))")
+      (point))))
+
+
+
+
 (provide 'duckdb-query-edit)
 
 ;;; duckdb-query-edit.el ends here
