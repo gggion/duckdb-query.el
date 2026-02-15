@@ -58,7 +58,7 @@ context rather than inline bindings.")
     (:data . "@data:%s"))
   "Alist mapping reference types to format strings for substitution.")
 
-;;;; Primitive: Locate Parameter
+;;;; Internal: Locate Parameter
 
 (defun duckdb-query-edit--find-param (form-beg form-end keyword)
   "Find KEYWORD parameter in form between FORM-BEG and FORM-END.
@@ -72,7 +72,7 @@ Uses `duckdb-query--parse-params' for structural extraction."
   (let ((params (duckdb-query--parse-params form-beg form-end)))
     (cl-find-if (lambda (p) (eq (plist-get p :key) keyword)) params)))
 
-;;;; Primitive: Insert Binding
+;;;; Internal: Insert Binding
 
 (defun duckdb-query-edit--insert-binding (form-beg form-end keyword name value)
   "Insert binding (NAME . VALUE) into KEYWORD parameter of enclosing form.
