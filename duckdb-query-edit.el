@@ -153,7 +153,25 @@ bindings, or reasonable default based on parameter position."
                        1)
                    ?\s))))
 
+(defun duckdb-query-edit--append-to-param (param name value)
+  "Append binding (NAME . VALUE) to existing PARAM alist."
+  (let* ((val-beg (plist-get param :val-beg))
+         (val-end (plist-get param :val-end))
+         (last-end (duckdb-query-edit--find-last-binding-end val-beg val-end)))
+    (unless last-end
+      (user-error "Cannot parse parameter alist structure"))
+    (save-excursion
+      (goto-char last-end)
+      (let ((indent (duckdb-query-edit--param-indent param)))
+        (insert "\n" indent "(" name " . " value ")")
+        (point)))))
 
+(defun duckdb-query-edit--insert-binding (form-beg form-end keyword name value)
+  "Insert binding (NAME . VALUE) into KEYWORD parameter of enclosing form."
+  (let ((param (duckdb-query-edit--find-param form-beg form-end keyword)))
+    (if param
+        (duckdb-query-edit--append-to-param param name value)
+      (duckdb-query-edit--insert-new-param form-end keyword name value))))
 
 
 (provide 'duckdb-query-edit)
