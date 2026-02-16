@@ -193,9 +193,6 @@ Return position after inserted text."
             " '((" name " . " value "))")
     (point)))
 
-
-(provide 'duckdb-query-edit)
-
 ;;;; Internal: Replace with Reference
 
 (defun duckdb-query-edit--replace-with-ref (beg end ref-type name)
@@ -520,6 +517,7 @@ Return integer count."
           (while (re-search-forward pattern str-end t)
             (cl-incf count)))))
     count))
+
 ;;;; Interactive: Extract to Reference
 
 (defun duckdb-query-edit--require-region-in-string ()
@@ -741,4 +739,7 @@ Also see `duckdb-query-edit-extract-to-sql'."
                                  (forward-sexp 1)
                                  (point))))
             (set-marker form-beg-marker nil)))))))
+
+
+(provide 'duckdb-query-edit)
 ;;; duckdb-query-edit.el ends here
