@@ -470,31 +470,32 @@ whitespace on the same line."
           (setq key-beg (1- (point)))))
       (delete-region key-beg val-end))))
 
-(defun duckdb-query-edit--remove-entry (target entries)
-  "Remove TARGET entry from among ENTRIES in parameter alist.
+(defun duckdb-query-edit--remove-entry (target _entries)
+  "Remove TARGET entry from parameter alist.
 
 TARGET is plist with :name, :beg, :end.
-ENTRIES is list of all entry plists in order.
 
-Remove the entry and surrounding whitespace/newline."
+Remove the entry.  When the entry occupies its own line (only
+whitespace between line start and entry start, and between entry
+end and next newline), delete the entire line.  Otherwise delete
+only the entry text."
   (let ((entry-beg (plist-get target :beg))
         (entry-end (plist-get target :end)))
     (save-excursion
-      ;; Extend to consume surrounding whitespace and newline
       (goto-char entry-beg)
-      (let ((line-start (line-beginning-position)))
-        (skip-chars-backward " \t" line-start)
-        (when (or (eq (char-before) ?\n)
-                  (bolp))
-          (setq entry-beg (if (eq (char-before) ?\n)
-                              (1- (point))
-                            (point)))))
-      ;; Also consume trailing whitespace up to newline
-      (goto-char entry-end)
-      (skip-chars-forward " \t")
-      (when (eq (char-after) ?\n)
-        (setq entry-end (1+ (point))))
-      (delete-region entry-beg entry-end))))
+      (let* ((line-start (line-beginning-position))
+             (before-is-blank (string-blank-p
+                               (buffer-substring-no-properties
+                                line-start entry-beg))))
+        (goto-char entry-end)
+        (skip-chars-forward " \t")
+        (let ((after-is-eol (or (eolp) (eobp))))
+          (if (and before-is-blank after-is-eol)
+              ;; Entry owns the line: delete line including newline
+              (delete-region line-start
+                             (min (1+ (line-end-position)) (point-max)))
+            ;; Entry shares a line: delete just the entry
+            (delete-region entry-beg entry-end)))))))
 
 ;;;; Internal: Reference Count Check
 
