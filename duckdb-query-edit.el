@@ -390,6 +390,138 @@ Return string suitable for insertion into a SQL string."
       (t text)))
     (_
      text)))
+;;;; Internal: Remove Binding
+
+(defun duckdb-query-edit--remove-binding (form-beg form-end keyword name)
+  "Remove binding NAME from KEYWORD parameter alist.
+
+FORM-BEG and FORM-END delimit the `duckdb-query' form.
+KEYWORD is :val, :sql, or :data.
+NAME is binding name as string.
+
+If this is the last binding in the parameter, remove the entire
+parameter (keyword and value) from the form.
+
+If other bindings remain, remove only the (NAME . VALUE) entry.
+
+Return non-nil if removal succeeded."
+  (let ((param (duckdb-query-edit--find-param form-beg form-end keyword)))
+    (when param
+      (save-excursion
+        (goto-char (plist-get param :val-beg))
+        ;; Skip quote/backquote
+        (when (memq (char-after) '(?' ?`))
+          (forward-char 1))
+        (when (eq (char-after) ?\()
+          (let* ((list-start (point))
+                 (list-end (save-excursion
+                             (when (duckdb-query--forward-sexp-safe)
+                               (point))))
+                 (entries nil))
+            (when list-end
+              ;; Collect all entries with their positions
+              (goto-char list-start)
+              (forward-char 1)
+              (while (< (point) (1- list-end))
+                (duckdb-query--skip-whitespace-and-comments)
+                (when (eq (char-after) ?,)
+                  (forward-char 1)
+                  (when (eq (char-after) ?@)
+                    (forward-char 1)))
+                (duckdb-query--skip-whitespace-and-comments)
+                (when (and (< (point) (1- list-end))
+                           (eq (char-after) ?\())
+                  (let ((entry-beg (point))
+                        (entry-name nil))
+                    (save-excursion
+                      (forward-char 1)
+                      (duckdb-query--skip-whitespace-and-comments)
+                      (when (looking-at "\\([a-zA-Z_][a-zA-Z0-9_-]*\\)")
+                        (setq entry-name (match-string 1))))
+                    (when (duckdb-query--forward-sexp-safe)
+                      (push (list :name entry-name
+                                  :beg entry-beg
+                                  :end (point))
+                            entries)))))
+              (setq entries (nreverse entries))
+              ;; Find target entry
+              (let ((target (cl-find-if
+                             (lambda (e) (equal (plist-get e :name) name))
+                             entries)))
+                (when target
+                  (if (= (length entries) 1)
+                      ;; Last binding: remove entire parameter
+                      (duckdb-query-edit--remove-param param)
+                    ;; Remove just the entry and surrounding whitespace
+                    (duckdb-query-edit--remove-entry target entries))
+                  t)))))))))
+
+(defun duckdb-query-edit--remove-param (param)
+  "Remove entire parameter PARAM (keyword and value) from form.
+
+PARAM is plist from `duckdb-query-edit--find-param'.
+Delete from keyword start to value end, including leading
+whitespace on the same line."
+  (let ((key-beg (plist-get param :key-beg))
+        (val-end (plist-get param :val-end)))
+    ;; Extend backward to consume leading whitespace and newline
+    (save-excursion
+      (goto-char key-beg)
+      (let ((line-start (line-beginning-position)))
+        (skip-chars-backward " \t" line-start)
+        (when (eq (char-before) ?\n)
+          (setq key-beg (1- (point)))))
+      (delete-region key-beg val-end))))
+
+(defun duckdb-query-edit--remove-entry (target entries)
+  "Remove TARGET entry from among ENTRIES in parameter alist.
+
+TARGET is plist with :name, :beg, :end.
+ENTRIES is list of all entry plists in order.
+
+Remove the entry and surrounding whitespace/newline."
+  (let ((entry-beg (plist-get target :beg))
+        (entry-end (plist-get target :end)))
+    (save-excursion
+      ;; Extend to consume surrounding whitespace and newline
+      (goto-char entry-beg)
+      (let ((line-start (line-beginning-position)))
+        (skip-chars-backward " \t" line-start)
+        (when (or (eq (char-before) ?\n)
+                  (bolp))
+          (setq entry-beg (if (eq (char-before) ?\n)
+                              (1- (point))
+                            (point)))))
+      ;; Also consume trailing whitespace up to newline
+      (goto-char entry-end)
+      (skip-chars-forward " \t")
+      (when (eq (char-after) ?\n)
+        (setq entry-end (1+ (point))))
+      (delete-region entry-beg entry-end))))
+
+;;;; Internal: Reference Count Check
+
+(defun duckdb-query-edit--count-refs (form-beg form-end ref-type name)
+  "Count occurrences of @REF-TYPE:NAME in form between FORM-BEG and FORM-END.
+
+REF-TYPE is :val, :sql, or :data.
+NAME is reference name string.
+
+Search all string literals in the form for matching references.
+
+Return integer count."
+  (let* ((type-str (substring (symbol-name ref-type) 1))
+         (pattern (format "@%s:%s\\b" (regexp-quote type-str)
+                          (regexp-quote name)))
+         (strings (duckdb-query--collect-strings-in-region form-beg form-end))
+         (count 0))
+    (save-excursion
+      (dolist (bounds strings)
+        (goto-char (1+ (car bounds)))
+        (let ((str-end (1- (cdr bounds))))
+          (while (re-search-forward pattern str-end t)
+            (cl-incf count)))))
+    count))
 ;;;; Interactive: Convenience Commands
 
 ;;;###autoload
