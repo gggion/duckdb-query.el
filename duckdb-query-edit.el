@@ -220,7 +220,7 @@ Return position after inserted reference."
       (insert ref-string)
       (point))))
 
-;;;; Value Formatting
+;;;; Internal: Value Formatting
 
 (defun duckdb-query-edit--format-value (text ref-type)
   "Format extracted TEXT as Elisp literal for REF-TYPE binding.
@@ -258,7 +258,138 @@ Return formatted string suitable for insertion as binding value."
      (format "%S" text))
     (:data
      text)))
+;;;; Internal: Detect Reference at Point
 
+(defun duckdb-query-edit--ref-at-point ()
+  "Detect @type:name reference at or around point.
+
+Return plist with :type, :name, :beg, :end if point is on a
+reference, or nil otherwise.
+
+Searches backward from point for @ character, then validates
+the reference pattern forward.  Handles cursor positioned
+anywhere within the @type:name text."
+  (save-excursion
+    (let ((orig (point))
+          (str-start (duckdb-query--in-string-p)))
+      (when str-start
+        ;; Search backward for @ within current string
+        (let ((search-start (max str-start (- orig 30))))
+          (goto-char orig)
+          (while (and (>= (point) search-start)
+                      (not (eq (char-after) ?@)))
+            (backward-char 1))
+          (when (and (eq (char-after) ?@)
+                     (looking-at "@\\(sql\\|data\\|val\\|org\\):\\([a-zA-Z_][a-zA-Z0-9_]*\\)"))
+            (let ((ref-end (match-end 0)))
+              ;; Verify original point was within the match
+              (when (and (<= (match-beginning 0) orig)
+                         (<= orig ref-end))
+                (list :type (intern (concat ":" (match-string 1)))
+                      :name (match-string 2)
+                      :beg (match-beginning 0)
+                      :end ref-end)))))))))
+
+;;;; Internal: Extract Binding Value Text
+
+(defun duckdb-query-edit--extract-binding-value (form-beg form-end keyword name)
+  "Extract the value text of binding NAME from KEYWORD parameter.
+
+FORM-BEG and FORM-END delimit the `duckdb-query' form.
+KEYWORD is :val, :sql, or :data.
+NAME is binding name as string.
+
+Walk the parameter alist structure to find the cons cell
+with NAME as car, then extract the cdr text.
+
+Return the value as a string (the Elisp literal as written in
+the buffer), or nil if binding not found.
+
+For :val with string value like \"\\\"hello\\\"\", returns the
+inner string content (without surrounding double quotes).
+For :val with numeric value like \"42\", returns \"42\".
+For :sql with value like \"\\\"SELECT ...\\\"\", returns the inner
+SQL text without surrounding double quotes."
+  (let ((param (duckdb-query-edit--find-param form-beg form-end keyword)))
+    (when param
+      (save-excursion
+        (goto-char (plist-get param :val-beg))
+        ;; Skip quote/backquote
+        (when (memq (char-after) '(?' ?`))
+          (forward-char 1))
+        ;; Enter the alist
+        (when (eq (char-after) ?\()
+          (let ((list-end (save-excursion
+                            (when (duckdb-query--forward-sexp-safe)
+                              (1- (point))))))
+            (when list-end
+              (forward-char 1)
+              (catch 'found
+                (while (< (point) list-end)
+                  (duckdb-query--skip-whitespace-and-comments)
+                  ;; Skip unquote markers
+                  (when (eq (char-after) ?,)
+                    (forward-char 1)
+                    (when (eq (char-after) ?@)
+                      (forward-char 1)))
+                  (duckdb-query--skip-whitespace-and-comments)
+                  (when (and (< (point) list-end)
+                             (eq (char-after) ?\())
+                    (let ((entry-start (point)))
+                      (forward-char 1)
+                      (duckdb-query--skip-whitespace-and-comments)
+                      (when (looking-at (regexp-quote name))
+                        (goto-char (match-end 0))
+                        (duckdb-query--skip-whitespace-and-comments)
+                        (when (eq (char-after) ?\.)
+                          (forward-char 1)
+                          (duckdb-query--skip-whitespace-and-comments)
+                          ;; Now at the value
+                          (let ((val-start (point)))
+                            (goto-char entry-start)
+                            (duckdb-query--forward-sexp-safe)
+                            ;; Back up past closing paren of entry
+                            (let ((val-text (string-trim
+                                            (buffer-substring-no-properties
+                                             val-start (1- (point))))))
+                              (throw 'found val-text)))))
+                      ;; Not this entry, skip it
+                      (goto-char entry-start)
+                      (unless (duckdb-query--forward-sexp-safe)
+                        (forward-char 1)))))))))))))
+
+(defun duckdb-query-edit--unquote-value (text ref-type)
+  "Convert binding value TEXT to inline form for REF-TYPE.
+
+TEXT is the raw Elisp literal as extracted from the buffer.
+
+For :sql, strip surrounding double quotes to get raw SQL.
+For :val, strip surrounding double quotes for strings, or
+return numeric text as-is.
+For :data, return as-is.
+
+Return string suitable for insertion into a SQL string."
+  (pcase ref-type
+    (:sql
+     (if (and (>= (length text) 2)
+              (eq (aref text 0) ?\")
+              (eq (aref text (1- (length text))) ?\"))
+         (let ((inner (substring text 1 -1)))
+           ;; Unescape escaped double quotes
+           (replace-regexp-in-string "\\\\\"" "\"" inner))
+       text))
+    (:val
+     (cond
+      ;; Elisp string literal
+      ((and (>= (length text) 2)
+            (eq (aref text 0) ?\")
+            (eq (aref text (1- (length text))) ?\"))
+       (let ((inner (substring text 1 -1)))
+         (replace-regexp-in-string "\\\\\"" "\"" inner)))
+      ;; Numeric or other literal
+      (t text)))
+    (_
+     text)))
 ;;;; Interactive: Convenience Commands
 
 ;;;###autoload
