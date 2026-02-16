@@ -345,8 +345,8 @@ SQL text without surrounding double quotes."
                             (duckdb-query--forward-sexp-safe)
                             ;; Back up past closing paren of entry
                             (let ((val-text (string-trim
-                                            (buffer-substring-no-properties
-                                             val-start (1- (point))))))
+                                             (buffer-substring-no-properties
+                                              val-start (1- (point))))))
                               (throw 'found val-text)))))
                       ;; Not this entry, skip it
                       (goto-char entry-start)
