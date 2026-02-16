@@ -358,6 +358,23 @@ SQL text without surrounding double quotes."
                       (unless (duckdb-query--forward-sexp-safe)
                         (forward-char 1)))))))))))))
 
+(defun duckdb-query-edit--strip-elisp-string-quotes (text)
+  "Strip surrounding double quotes and unescape from Elisp string literal TEXT.
+
+Return inner content if TEXT is a quoted string literal.
+Return TEXT unchanged if not double-quoted.
+
+Used by `duckdb-query-edit--unquote-value' for both :sql and :val
+branches."
+  (if (and (>= (length text) 2)
+           (eq (aref text 0) ?\")
+           (eq (aref text (1- (length text))) ?\"))
+      (replace-regexp-in-string
+       "\\\\\""  "\""
+       (substring text 1 -1))
+    text))
+
+
 (defun duckdb-query-edit--unquote-value (text ref-type)
   "Convert binding value TEXT to inline form for REF-TYPE.
 
@@ -368,28 +385,14 @@ For :val, strip surrounding double quotes for strings, or
 return numeric text as-is.
 For :data, return as-is.
 
-Return string suitable for insertion into a SQL string."
+Return string suitable for insertion into a SQL string.
+
+Uses `duckdb-query-edit--strip-elisp-string-quotes' for
+double-quote stripping."
   (pcase ref-type
-    (:sql
-     (if (and (>= (length text) 2)
-              (eq (aref text 0) ?\")
-              (eq (aref text (1- (length text))) ?\"))
-         (let ((inner (substring text 1 -1)))
-           ;; Unescape escaped double quotes
-           (replace-regexp-in-string "\\\\\"" "\"" inner))
-       text))
-    (:val
-     (cond
-      ;; Elisp string literal
-      ((and (>= (length text) 2)
-            (eq (aref text 0) ?\")
-            (eq (aref text (1- (length text))) ?\"))
-       (let ((inner (substring text 1 -1)))
-         (replace-regexp-in-string "\\\\\"" "\"" inner)))
-      ;; Numeric or other literal
-      (t text)))
-    (_
-     text)))
+    ((or :sql :val) (duckdb-query-edit--strip-elisp-string-quotes text))
+    (_ text)))
+
 ;;;; Internal: Remove Binding
 
 (defun duckdb-query-edit--remove-binding (form-beg form-end keyword name)
