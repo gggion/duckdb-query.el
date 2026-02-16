@@ -58,6 +58,42 @@ context rather than inline bindings.")
     (:data . "@data:%s"))
   "Alist mapping reference types to format strings for substitution.")
 
+;;;; Customization
+
+(defcustom duckdb-query-edit-indent-after-edit nil
+  "Whether to re-indent the form after structural edits.
+
+When non-nil, run `indent-region' on the enclosing `duckdb-query'
+form after extraction, inlining, or binding removal.
+
+When nil, leave indentation unchanged.  Use this when
+`aggressive-indent-mode' or other formatting tools manage
+indentation automatically.
+
+Also see `duckdb-query-edit-extract-to-ref'.
+Also see `duckdb-query-edit-inline-ref'.
+Also see `duckdb-query-edit-remove-binding'."
+  :type 'boolean
+  :group 'duckdb-query
+  :package-version '(duckdb-query . "0.8.0"))
+
+;;;; Internal: Conditional Indentation
+
+(defun duckdb-query-edit--indent-form (form-beg-marker)
+  "Re-indent `duckdb-query' form at FORM-BEG-MARKER if enabled.
+
+Do nothing when `duckdb-query-edit-indent-after-edit' is nil.
+
+FORM-BEG-MARKER is a marker at the opening parenthesis of the form.
+Compute form end by calling `forward-sexp' from the marker position."
+  (when duckdb-query-edit-indent-after-edit
+    (indent-region (marker-position form-beg-marker)
+                   (save-excursion
+                     (goto-char (marker-position form-beg-marker))
+                     (forward-sexp 1)
+                     (point)))))
+
+
 ;;;; Internal: Locate Parameter
 
 (defun duckdb-query-edit--find-param (form-beg form-end keyword)
@@ -615,12 +651,8 @@ Also see `duckdb-query-edit-extract-to-sql' for pre-typed variant."
              (marker-position beg-marker)
              (marker-position end-marker)
              ref-type name)
-            ;; Re-indent the form
-            (indent-region (marker-position form-beg-marker)
-                           (save-excursion
-                             (goto-char (marker-position form-beg-marker))
-                             (forward-sexp 1)
-                             (point))))
+            ;; Re-indent the form IF enabled
+            (duckdb-query-edit--indent-form form-beg-marker))
         ;; Clean up markers
         (set-marker beg-marker nil)
         (set-marker end-marker nil)
@@ -744,12 +776,8 @@ Also see `duckdb-query-edit-remove-binding'."
                    (marker-position form-beg-marker)
                    (marker-position form-end-marker)
                    ref-type ref-name))
-                ;; Re-indent
-                (indent-region (marker-position form-beg-marker)
-                               (save-excursion
-                                 (goto-char (marker-position form-beg-marker))
-                                 (forward-sexp 1)
-                                 (point))))
+                ;; Re-indent IF the setting is enabled
+                (duckdb-query-edit--indent-form form-beg-marker))
             (set-marker form-beg-marker nil)
             (set-marker form-end-marker nil)))))))
 
@@ -803,11 +831,9 @@ all orphaned bindings."
                          form-beg form-end ref-type ref-name)
                   (user-error "No binding for %s in %s parameter"
                               ref-name (symbol-name ref-type)))
-                (indent-region (marker-position form-beg-marker)
-                               (save-excursion
-                                 (goto-char (marker-position form-beg-marker))
-                                 (forward-sexp 1)
-                                 (point)))
+
+                ;; Re-indent IF the setting is enabled
+                (duckdb-query-edit--indent-form form-beg-marker)
                 (message "Removed %s:%s binding"
                          (substring (symbol-name ref-type) 1)
                          ref-name))
