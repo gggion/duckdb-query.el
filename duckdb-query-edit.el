@@ -560,4 +560,58 @@ Also see `duckdb-query-edit-extract-to-sql' for pre-typed variant."
         (set-marker end-marker nil)
         (set-marker form-beg-marker nil)
         (set-marker form-end-marker nil)))))
+;;;; Interactive: Inline Reference
+
+;;;###autoload
+(defun duckdb-query-edit-inline-ref ()
+  "Replace @type:name reference at point with its binding value.
+
+Look up the binding value from the corresponding parameter alist
+and replace the reference text with the value.
+
+For :sql bindings, the SQL fragment text is inserted directly.
+For :val bindings, the Elisp value is unquoted for insertion.
+
+Does not remove the binding entry.  Orphaned bindings are visible
+via `duckdb-query-font-lock-mode' and can be removed manually or
+with `duckdb-query-edit-remove-binding'.
+
+Inverse of `duckdb-query-edit-extract-to-ref'.
+
+Also see `duckdb-query-edit-extract-to-val'.
+Also see `duckdb-query-edit-extract-to-sql'."
+  (interactive)
+  (let ((ref (duckdb-query-edit--ref-at-point)))
+    (unless ref
+      (user-error "No @type:name reference at point"))
+    (let* ((ref-type (plist-get ref :type))
+           (ref-name (plist-get ref :name))
+           (ref-beg (plist-get ref :beg))
+           (ref-end (plist-get ref :end))
+           (form-bounds (duckdb-query--find-enclosing-form)))
+      (unless form-bounds
+        (user-error "Not inside a duckdb-query form"))
+      (when (eq ref-type :org)
+        (user-error "@org: references resolve from buffer context, not parameters"))
+      (let* ((form-beg (car form-bounds))
+             (form-end (cdr form-bounds))
+             (raw-value (duckdb-query-edit--extract-binding-value
+                         form-beg form-end ref-type ref-name)))
+        (unless raw-value
+          (user-error "No binding for %s in %s parameter"
+                      ref-name (symbol-name ref-type)))
+        (let* ((inline-text (duckdb-query-edit--unquote-value raw-value ref-type))
+               (form-beg-marker (copy-marker form-beg)))
+          (unwind-protect
+              (progn
+                (goto-char ref-beg)
+                (delete-region ref-beg ref-end)
+                (insert inline-text)
+                ;; Re-indent
+                (indent-region (marker-position form-beg-marker)
+                               (save-excursion
+                                 (goto-char (marker-position form-beg-marker))
+                                 (forward-sexp 1)
+                                 (point))))
+            (set-marker form-beg-marker nil)))))))
 ;;; duckdb-query-edit.el ends here
