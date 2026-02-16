@@ -338,7 +338,7 @@ SQL text without surrounding double quotes."
                     (let ((entry-start (point)))
                       (forward-char 1)
                       (duckdb-query--skip-whitespace-and-comments)
-                      (when (looking-at (regexp-quote name))
+                      (when (looking-at (concat (regexp-quote name) "\\_>"))
                         (goto-char (match-end 0))
                         (duckdb-query--skip-whitespace-and-comments)
                         (when (eq (char-after) ?\.)
