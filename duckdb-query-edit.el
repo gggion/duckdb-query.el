@@ -266,25 +266,25 @@ Return formatted string suitable for insertion as binding value."
 Return plist with :type, :name, :beg, :end if point is on a
 reference, or nil otherwise.
 
-Searches backward from point for @ character, then validates
-the reference pattern forward.  Handles cursor positioned
-anywhere within the @type:name text."
+Uses `skip-chars-backward' to locate the @ trigger, then
+validates the reference pattern forward.  Handles cursor
+positioned anywhere within the @type:name text."
   (save-excursion
     (let ((orig (point))
           (str-start (duckdb-query--in-string-p)))
       (when str-start
-        ;; Search backward for @ within current string
-        (let ((search-start (max str-start (- orig 30))))
-          (goto-char orig)
-          (while (and (>= (point) search-start)
+        ;; Skip backward over characters valid in references
+        (skip-chars-backward "a-zA-Z0-9_:@" str-start)
+        ;; May have landed before @, scan forward to find it
+        (let ((search-end (min (1+ orig) (point-max))))
+          (while (and (< (point) search-end)
                       (not (eq (char-after) ?@)))
-            (backward-char 1))
+            (forward-char 1))
           (when (and (eq (char-after) ?@)
                      (looking-at "@\\(sql\\|data\\|val\\|org\\):\\([a-zA-Z_][a-zA-Z0-9_]*\\)"))
             (let ((ref-end (match-end 0)))
               ;; Verify original point was within the match
-              (when (and (<= (match-beginning 0) orig)
-                         (<= orig ref-end))
+              (when (<= orig ref-end)
                 (list :type (intern (concat ":" (match-string 1)))
                       :name (match-string 2)
                       :beg (match-beginning 0)
