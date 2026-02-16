@@ -258,4 +258,175 @@ Return formatted string suitable for insertion as binding value."
      (format "%S" text))
     (:data
      text)))
+
+;;;; Interactive: Convenience Commands
+
+;;;###autoload
+(defun duckdb-query-edit-extract-to-val (beg end name)
+  "Extract region BEG..END into :val parameter with NAME.
+
+Convenience wrapper around `duckdb-query-edit-extract-to-ref' with
+REF-TYPE pre-set to :val.
+
+When called interactively, prompt only for NAME.
+
+Also see `duckdb-query-edit-extract-to-ref' for full control.
+Also see `duckdb-query-edit-extract-to-sql' for SQL fragments."
+  (interactive
+   (progn
+     (unless (duckdb-query--find-enclosing-form)
+       (user-error "Not inside a duckdb-query form"))
+     (unless (use-region-p)
+       (user-error "No active region; select text to extract"))
+     (unless (duckdb-query--in-string-p)
+       (user-error "Region must be inside a string"))
+     (let ((name (read-string "@val: name: ")))
+       (when (string-empty-p name)
+         (user-error "Binding name cannot be empty"))
+       (list (region-beginning) (region-end) name))))
+  (duckdb-query-edit-extract-to-ref beg end :val name))
+
+;;;###autoload
+(defun duckdb-query-edit-extract-to-sql (beg end name)
+  "Extract region BEG..END into :sql parameter with NAME.
+
+Convenience wrapper around `duckdb-query-edit-extract-to-ref' with
+REF-TYPE pre-set to :sql.
+
+When called interactively, prompt only for NAME.
+
+Also see `duckdb-query-edit-extract-to-ref' for full control.
+Also see `duckdb-query-edit-extract-to-val' for literal values."
+  (interactive
+   (progn
+     (unless (duckdb-query--find-enclosing-form)
+       (user-error "Not inside a duckdb-query form"))
+     (unless (use-region-p)
+       (user-error "No active region; select text to extract"))
+     (unless (duckdb-query--in-string-p)
+       (user-error "Region must be inside a string"))
+     (let ((name (read-string "@sql: name: ")))
+       (when (string-empty-p name)
+         (user-error "Binding name cannot be empty"))
+       (list (region-beginning) (region-end) name))))
+  (duckdb-query-edit-extract-to-ref beg end :sql name))
+
+;;;###autoload
+(defun duckdb-query-edit-extract-to-data (beg end name)
+  "Extract region BEG..END into :data parameter with NAME.
+
+Convenience wrapper around `duckdb-query-edit-extract-to-ref' with
+REF-TYPE pre-set to :data.
+
+When called interactively, prompt only for NAME.
+
+The extracted text is inserted as-is into the :data binding.
+Edit the binding value manually to provide the Elisp data
+expression.
+
+Also see `duckdb-query-edit-extract-to-ref' for full control.
+Also see `duckdb-query-edit-extract-to-val' for literal values."
+  (interactive
+   (progn
+     (unless (duckdb-query--find-enclosing-form)
+       (user-error "Not inside a duckdb-query form"))
+     (unless (use-region-p)
+       (user-error "No active region; select text to extract"))
+     (unless (duckdb-query--in-string-p)
+       (user-error "Region must be inside a string"))
+     (let ((name (read-string "@data: name: ")))
+       (when (string-empty-p name)
+         (user-error "Binding name cannot be empty"))
+       (list (region-beginning) (region-end) name))))
+  (duckdb-query-edit-extract-to-ref beg end :data name))
+;;;; Interactive: Extract to Reference
+;;;###autoload
+(defun duckdb-query-edit-extract-to-ref (beg end ref-type name)
+  "Extract region BEG..END into REF-TYPE parameter with NAME.
+
+Replace selected text with @REF-TYPE:NAME reference and insert
+corresponding binding into the parameter alist.
+
+When called interactively with active region inside a `duckdb-query'
+SQL string, prompt for REF-TYPE and NAME.
+
+REF-TYPE is :val, :sql, or :data.
+NAME is binding name string.
+
+The extracted text is formatted appropriately for the target
+parameter type:
+
+  :val - SQL quotes stripped, stored as Elisp literal
+  :sql - Stored as Elisp string
+  :data - Stored as-is (for manual editing)
+
+Uses markers to track region positions across buffer modifications,
+ensuring correct replacement regardless of where the binding is
+inserted relative to the region.
+
+Example workflow:
+
+  ;; Given:
+  (duckdb-query \"SELECT * FROM \\='./data/users.csv\\='\")
+
+  ;; Select \\='./data/users.csv\\=', invoke with :val and \"csv_path\":
+  (duckdb-query \"SELECT * FROM @val:csv_path\"
+                :val \\='((csv_path . \"./data/users.csv\")))
+
+Uses `duckdb-query-edit--insert-binding' and
+`duckdb-query-edit--replace-with-ref'.
+Also see `duckdb-query-edit-extract-to-val' for pre-typed variant.
+Also see `duckdb-query-edit-extract-to-sql' for pre-typed variant."
+  (interactive
+   (let ((form-bounds (duckdb-query--find-enclosing-form)))
+     (unless form-bounds
+       (user-error "Not inside a duckdb-query form"))
+     (unless (use-region-p)
+       (user-error "No active region; select text to extract"))
+     (unless (duckdb-query--in-string-p)
+       (user-error "Region must be inside a string"))
+     (let* ((type-str (completing-read
+                       "Reference type: "
+                       '("val" "sql" "data")
+                       nil t))
+            (ref-type (intern (concat ":" type-str)))
+            (name (read-string (format "@%s: name: " type-str))))
+       (when (string-empty-p name)
+         (user-error "Binding name cannot be empty"))
+       (list (region-beginning) (region-end) ref-type name))))
+  (let ((form-bounds (duckdb-query--find-enclosing-form)))
+    (unless form-bounds
+      (user-error "Not inside a duckdb-query form"))
+    (let* ((text (buffer-substring-no-properties beg end))
+           (value (duckdb-query-edit--format-value text ref-type))
+           ;; Use markers to survive buffer modifications
+           (beg-marker (copy-marker beg))
+           (end-marker (copy-marker end))
+           (form-beg-marker (copy-marker (car form-bounds)))
+           (form-end-marker (copy-marker (cdr form-bounds))))
+      (unwind-protect
+          (progn
+            ;; Insert binding first.  Markers track region positions
+            ;; automatically regardless of insertion location.
+            (duckdb-query-edit--insert-binding
+             (marker-position form-beg-marker)
+             (marker-position form-end-marker)
+             ref-type name value)
+            ;; Replace original text with reference.  Markers have
+            ;; adjusted for any text inserted before the region.
+            (duckdb-query-edit--replace-with-ref
+             (marker-position beg-marker)
+             (marker-position end-marker)
+             ref-type name)
+            ;; Re-indent the form
+            (indent-region (marker-position form-beg-marker)
+                           (save-excursion
+                             (goto-char (marker-position form-beg-marker))
+                             (forward-sexp 1)
+                             (point))))
+        ;; Clean up markers
+        (set-marker beg-marker nil)
+        (set-marker end-marker nil)
+        (set-marker form-beg-marker nil)
+        (set-marker form-end-marker nil)))))
 ;;; duckdb-query-edit.el ends here
