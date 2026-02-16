@@ -688,7 +688,7 @@ Also see `duckdb-query-edit-extract-to-val' for literal values."
 ;;;; Interactive: Inline Reference
 
 ;;;###autoload
-(defun duckdb-query-edit-inline-ref ()
+(defun duckdb-query-edit-inline-ref (&optional remove-binding)
   "Replace @type:name reference at point with its binding value.
 
 Look up the binding value from the corresponding parameter alist
@@ -697,15 +697,20 @@ and replace the reference text with the value.
 For :sql bindings, the SQL fragment text is inserted directly.
 For :val bindings, the Elisp value is unquoted for insertion.
 
-Does not remove the binding entry.  Orphaned bindings are visible
-via `duckdb-query-font-lock-mode' and can be removed manually or
-with `duckdb-query-edit-remove-binding'.
+With prefix argument REMOVE-BINDING (\\[universal-argument]),
+also remove the binding entry from the parameter alist.  When
+the binding is the last in its parameter, the entire parameter
+is removed.
+
+Without prefix argument, the binding entry is preserved.
+Orphaned bindings are visible via `duckdb-query-font-lock-mode'.
 
 Inverse of `duckdb-query-edit-extract-to-ref'.
 
 Also see `duckdb-query-edit-extract-to-val'.
-Also see `duckdb-query-edit-extract-to-sql'."
-  (interactive)
+Also see `duckdb-query-edit-extract-to-sql'.
+Also see `duckdb-query-edit-remove-binding'."
+  (interactive "P")
   (let ((ref (duckdb-query-edit--ref-at-point)))
     (unless ref
       (user-error "No @type:name reference at point"))
@@ -726,19 +731,27 @@ Also see `duckdb-query-edit-extract-to-sql'."
           (user-error "No binding for %s in %s parameter"
                       ref-name (symbol-name ref-type)))
         (let* ((inline-text (duckdb-query-edit--unquote-value raw-value ref-type))
-               (form-beg-marker (copy-marker form-beg)))
+               (form-beg-marker (copy-marker form-beg))
+               (form-end-marker (copy-marker form-end)))
           (unwind-protect
               (progn
                 (goto-char ref-beg)
                 (delete-region ref-beg ref-end)
                 (insert inline-text)
+                ;; Remove binding if prefix argument given
+                (when remove-binding
+                  (duckdb-query-edit--remove-binding
+                   (marker-position form-beg-marker)
+                   (marker-position form-end-marker)
+                   ref-type ref-name))
                 ;; Re-indent
                 (indent-region (marker-position form-beg-marker)
                                (save-excursion
                                  (goto-char (marker-position form-beg-marker))
                                  (forward-sexp 1)
                                  (point))))
-            (set-marker form-beg-marker nil)))))))
+            (set-marker form-beg-marker nil)
+            (set-marker form-end-marker nil)))))))
 
 
 (provide 'duckdb-query-edit)
