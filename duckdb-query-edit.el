@@ -186,17 +186,12 @@ KEYWORD is :val, :sql, or :data.
 NAME is binding name string.
 VALUE is Elisp literal string.
 
-Insert before the closing parenthesis of the `duckdb-query' form.
 Return position after inserted text."
   (save-excursion
     (goto-char (1- form-end))
-    (let* ((form-col (save-excursion
-                       (backward-up-list 1)
-                       (current-column)))
-           (indent (make-string (+ form-col 14) ?\s)))
-      (insert "\n" indent (symbol-name keyword)
-              " '((" name " . " value "))")
-      (point))))
+    (insert "\n" (symbol-name keyword)
+            " '((" name " . " value "))")
+    (point)))
 
 
 (provide 'duckdb-query-edit)
