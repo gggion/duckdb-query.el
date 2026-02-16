@@ -753,6 +753,65 @@ Also see `duckdb-query-edit-remove-binding'."
             (set-marker form-beg-marker nil)
             (set-marker form-end-marker nil)))))))
 
+;;;; Interactive: Remove Reference
+;;;###autoload
+(defun duckdb-query-edit-remove-binding ()
+  "Remove binding for @type:name reference at point.
+
+The reference text at point is not modified; only the
+corresponding entry in the parameter alist is deleted.
+When the entry is the last in its parameter, the entire
+parameter (keyword and value) is removed.
+
+If other references to this binding exist in the form,
+prompt for confirmation before removing.
+
+Uses `duckdb-query-edit--count-refs' to detect remaining
+references.
+Uses `duckdb-query-edit--remove-binding' for deletion.
+
+Also see `duckdb-query-edit-inline-ref' with prefix argument
+to inline and remove in one step.
+Also see `duckdb-query-edit-remove-unused-bindings' to remove
+all orphaned bindings."
+  (interactive)
+  (let ((ref (duckdb-query-edit--ref-at-point)))
+    (unless ref
+      (user-error "No @type:name reference at point"))
+    (let* ((ref-type (plist-get ref :type))
+           (ref-name (plist-get ref :name))
+           (form-bounds (duckdb-query--find-enclosing-form)))
+      (unless form-bounds
+        (user-error "Not inside a duckdb-query form"))
+      (when (eq ref-type :org)
+        (user-error "@org: references resolve from buffer context, not parameters"))
+      (let* ((form-beg (car form-bounds))
+             (form-end (cdr form-bounds))
+             (ref-count (duckdb-query-edit--count-refs
+                         form-beg form-end ref-type ref-name)))
+        ;; Warn if other references exist (count > 1 means current + others)
+        (when (and (> ref-count 1)
+                   (not (y-or-n-p
+                         (format "@%s:%s has %d references; remove binding anyway? "
+                                 (substring (symbol-name ref-type) 1)
+                                 ref-name ref-count))))
+          (user-error "Aborted"))
+        (let ((form-beg-marker (copy-marker form-beg)))
+          (unwind-protect
+              (progn
+                (unless (duckdb-query-edit--remove-binding
+                         form-beg form-end ref-type ref-name)
+                  (user-error "No binding for %s in %s parameter"
+                              ref-name (symbol-name ref-type)))
+                (indent-region (marker-position form-beg-marker)
+                               (save-excursion
+                                 (goto-char (marker-position form-beg-marker))
+                                 (forward-sexp 1)
+                                 (point)))
+                (message "Removed %s:%s binding"
+                         (substring (symbol-name ref-type) 1)
+                         ref-name))
+            (set-marker form-beg-marker nil)))))))
 
 (provide 'duckdb-query-edit)
 ;;; duckdb-query-edit.el ends here
