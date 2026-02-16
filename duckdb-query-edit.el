@@ -374,7 +374,6 @@ branches."
        (substring text 1 -1))
     text))
 
-
 (defun duckdb-query-edit--unquote-value (text ref-type)
   "Convert binding value TEXT to inline form for REF-TYPE.
 
@@ -525,87 +524,32 @@ Return integer count."
           (while (re-search-forward pattern str-end t)
             (cl-incf count)))))
     count))
-;;;; Interactive: Convenience Commands
-
-;;;###autoload
-(defun duckdb-query-edit-extract-to-val (beg end name)
-  "Extract region BEG..END into :val parameter with NAME.
-
-Convenience wrapper around `duckdb-query-edit-extract-to-ref' with
-REF-TYPE pre-set to :val.
-
-When called interactively, prompt only for NAME.
-
-Also see `duckdb-query-edit-extract-to-ref' for full control.
-Also see `duckdb-query-edit-extract-to-sql' for SQL fragments."
-  (interactive
-   (progn
-     (unless (duckdb-query--find-enclosing-form)
-       (user-error "Not inside a duckdb-query form"))
-     (unless (use-region-p)
-       (user-error "No active region; select text to extract"))
-     (unless (duckdb-query--in-string-p)
-       (user-error "Region must be inside a string"))
-     (let ((name (read-string "@val: name: ")))
-       (when (string-empty-p name)
-         (user-error "Binding name cannot be empty"))
-       (list (region-beginning) (region-end) name))))
-  (duckdb-query-edit-extract-to-ref beg end :val name))
-
-;;;###autoload
-(defun duckdb-query-edit-extract-to-sql (beg end name)
-  "Extract region BEG..END into :sql parameter with NAME.
-
-Convenience wrapper around `duckdb-query-edit-extract-to-ref' with
-REF-TYPE pre-set to :sql.
-
-When called interactively, prompt only for NAME.
-
-Also see `duckdb-query-edit-extract-to-ref' for full control.
-Also see `duckdb-query-edit-extract-to-val' for literal values."
-  (interactive
-   (progn
-     (unless (duckdb-query--find-enclosing-form)
-       (user-error "Not inside a duckdb-query form"))
-     (unless (use-region-p)
-       (user-error "No active region; select text to extract"))
-     (unless (duckdb-query--in-string-p)
-       (user-error "Region must be inside a string"))
-     (let ((name (read-string "@sql: name: ")))
-       (when (string-empty-p name)
-         (user-error "Binding name cannot be empty"))
-       (list (region-beginning) (region-end) name))))
-  (duckdb-query-edit-extract-to-ref beg end :sql name))
-
-;;;###autoload
-(defun duckdb-query-edit-extract-to-data (beg end name)
-  "Extract region BEG..END into :data parameter with NAME.
-
-Convenience wrapper around `duckdb-query-edit-extract-to-ref' with
-REF-TYPE pre-set to :data.
-
-When called interactively, prompt only for NAME.
-
-The extracted text is inserted as-is into the :data binding.
-Edit the binding value manually to provide the Elisp data
-expression.
-
-Also see `duckdb-query-edit-extract-to-ref' for full control.
-Also see `duckdb-query-edit-extract-to-val' for literal values."
-  (interactive
-   (progn
-     (unless (duckdb-query--find-enclosing-form)
-       (user-error "Not inside a duckdb-query form"))
-     (unless (use-region-p)
-       (user-error "No active region; select text to extract"))
-     (unless (duckdb-query--in-string-p)
-       (user-error "Region must be inside a string"))
-     (let ((name (read-string "@data: name: ")))
-       (when (string-empty-p name)
-         (user-error "Binding name cannot be empty"))
-       (list (region-beginning) (region-end) name))))
-  (duckdb-query-edit-extract-to-ref beg end :data name))
 ;;;; Interactive: Extract to Reference
+
+(defun duckdb-query-edit--require-region-in-string ()
+  "Validate preconditions for extraction commands.
+
+Signal `user-error' if point is not inside a `duckdb-query' form,
+no region is active, or region is not inside a string.
+
+Called by `interactive' specs of extraction commands."
+  (unless (duckdb-query--find-enclosing-form)
+    (user-error "Not inside a duckdb-query form"))
+  (unless (use-region-p)
+    (user-error "No active region; select text to extract"))
+  (unless (duckdb-query--in-string-p)
+    (user-error "Region must be inside a string")))
+
+(defun duckdb-query-edit--read-binding-name (type-str)
+  "Prompt for binding name with TYPE-STR prefix.
+
+Signal `user-error' if name is empty.
+Return name string."
+  (let ((name (read-string (format "@%s: name: " type-str))))
+    (when (string-empty-p name)
+      (user-error "Binding name cannot be empty"))
+    name))
+
 ;;;###autoload
 (defun duckdb-query-edit-extract-to-ref (beg end ref-type name)
   "Extract region BEG..END into REF-TYPE parameter with NAME.
@@ -644,21 +588,14 @@ Uses `duckdb-query-edit--insert-binding' and
 Also see `duckdb-query-edit-extract-to-val' for pre-typed variant.
 Also see `duckdb-query-edit-extract-to-sql' for pre-typed variant."
   (interactive
-   (let ((form-bounds (duckdb-query--find-enclosing-form)))
-     (unless form-bounds
-       (user-error "Not inside a duckdb-query form"))
-     (unless (use-region-p)
-       (user-error "No active region; select text to extract"))
-     (unless (duckdb-query--in-string-p)
-       (user-error "Region must be inside a string"))
+   (progn
+     (duckdb-query-edit--require-region-in-string)
      (let* ((type-str (completing-read
                        "Reference type: "
                        '("val" "sql" "data")
                        nil t))
             (ref-type (intern (concat ":" type-str)))
-            (name (read-string (format "@%s: name: " type-str))))
-       (when (string-empty-p name)
-         (user-error "Binding name cannot be empty"))
+            (name (duckdb-query-edit--read-binding-name type-str)))
        (list (region-beginning) (region-end) ref-type name))))
   (let ((form-bounds (duckdb-query--find-enclosing-form)))
     (unless form-bounds
@@ -695,6 +632,65 @@ Also see `duckdb-query-edit-extract-to-sql' for pre-typed variant."
         (set-marker end-marker nil)
         (set-marker form-beg-marker nil)
         (set-marker form-end-marker nil)))))
+
+;;;###autoload
+(defun duckdb-query-edit-extract-to-val (beg end name)
+  "Extract region BEG..END into :val parameter with NAME.
+
+Convenience wrapper around `duckdb-query-edit-extract-to-ref' with
+REF-TYPE pre-set to :val.
+
+When called interactively, prompt only for NAME.
+
+Also see `duckdb-query-edit-extract-to-ref' for full control.
+Also see `duckdb-query-edit-extract-to-sql' for SQL fragments."
+  (interactive
+   (progn
+     (duckdb-query-edit--require-region-in-string)
+     (let ((name (duckdb-query-edit--read-binding-name "val")))
+       (list (region-beginning) (region-end) name))))
+  (duckdb-query-edit-extract-to-ref beg end :val name))
+
+;;;###autoload
+(defun duckdb-query-edit-extract-to-sql (beg end name)
+  "Extract region BEG..END into :sql parameter with NAME.
+
+Convenience wrapper around `duckdb-query-edit-extract-to-ref' with
+REF-TYPE pre-set to :sql.
+
+When called interactively, prompt only for NAME.
+
+Also see `duckdb-query-edit-extract-to-ref' for full control.
+Also see `duckdb-query-edit-extract-to-val' for literal values."
+  (interactive
+   (progn
+     (duckdb-query-edit--require-region-in-string)
+     (let ((name (duckdb-query-edit--read-binding-name "sql")))
+       (list (region-beginning) (region-end) name))))
+  (duckdb-query-edit-extract-to-ref beg end :sql name))
+
+;;;###autoload
+(defun duckdb-query-edit-extract-to-data (beg end name)
+  "Extract region BEG..END into :data parameter with NAME.
+
+Convenience wrapper around `duckdb-query-edit-extract-to-ref' with
+REF-TYPE pre-set to :data.
+
+When called interactively, prompt only for NAME.
+
+The extracted text is inserted as-is into the :data binding.
+Edit the binding value manually to provide the Elisp data
+expression.
+
+Also see `duckdb-query-edit-extract-to-ref' for full control.
+Also see `duckdb-query-edit-extract-to-val' for literal values."
+  (interactive
+   (progn
+     (duckdb-query-edit--require-region-in-string)
+     (let ((name (duckdb-query-edit--read-binding-name "data")))
+       (list (region-beginning) (region-end) name))))
+  (duckdb-query-edit-extract-to-ref beg end :data name))
+
 ;;;; Interactive: Inline Reference
 
 ;;;###autoload
