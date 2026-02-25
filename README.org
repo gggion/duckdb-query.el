@@ -1759,13 +1759,34 @@ users who rely on ~aggressive-indent-mode~ or other formatting tools:
 :CUSTOM_ID: acknowledgements
 :END:
 
-- [[https://github.com/ak-coram/cl-duckdb][cl-duckdb]] by Ákos Kiss: The Common Lisp DuckDB wrapper that inspired this
-  package's design philosophy. The approach of treating query results as native
-  Lisp data structures, the ~with-static-table~ pattern for querying Lisp data
-  directly, and the ~with-transient-connection~ / ~with-default-connection~
-  macros for database context management all informed the design of
-  duckdb-query's ~:data~ parameter, ~@org:~ references, and
-  ~duckdb-query-with-transient-database~ / ~duckdb-query-with-database~ forms.
+Several packages and tools served as reference points for the design and
+implementation of duckdb-query. I would like to credit:
+
+- [[https://github.com/ak-coram/cl-duckdb][cl-duckdb]] by Ákos Kiss: The Common Lisp DuckDB wrapper that inspired treating
+  query results as native Lisp data structures. The =with-static-table= pattern
+  for querying Lisp data directly and the =with-transient-connection= /
+  =with-default-connection= macros for database context management informed the
+  design of =:data=, =@org:= references, =duckdb-query-with-transient-database=, and
+  =duckdb-query-with-database=.
+
+- [[https://github.com/marijnh/Postmodern][Postmodern]] by Marijn Haverbeke: Common Lisp library for PostgreSQL
+  interaction. The database context macros and the =:row=, =:column=, and =:single=
+  output formats introduced in version 0.8 were taken directly from Postmodern's
+  design.
+
+- [[https://github.com/distichum/datagrid][datagrid]] by Joshua Lambert: Emacs package for data manipulation. The decision
+  to add the =:columnar= output format was partly inspired by this package.
+
+- [[https://github.com/tconbeer/harlequin][Harlequin]] by Ted Conbeer: The SQL autocompletion cache and its use of DuckDB
+  meta-functions (=duckdb_functions=, =duckdb_tables=, =duckdb_keywords=,
+  =duckdb_types=) for context-aware completion were inspired by Harlequin's
+  approach.
+
+- Font-lock implementation drew from several packages by Fanael Linithien:
+  [[https://github.com/Fanael/highlight-defined][highlight-defined]], [[https://github.com/Fanael/highlight-numbers][highlight-numbers]], and especially [[https://github.com/Fanael/rainbow-delimiters][rainbow-delimiters]].
+
+- [[https://github.com/abo-abo/lispy][lispy]] by Oleh Krehel: The parser's use of [[https://www.gnu.org/software/emacs/manual/html_node/elisp/Position-Parse.html#index-syntax_002dppss][syntax-ppss]] for structural analysis
+  of Elisp forms was learned from studying lispy's implementation.
 
 * Related Packages
 :PROPERTIES:
