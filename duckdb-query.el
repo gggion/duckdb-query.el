@@ -308,6 +308,256 @@ Also see `duckdb-query' with :format :columnar for multiple columns."
      (t
       (append col-data nil)))))
 
+;;;; Type String Parsing
+
+(defun duckdb-query--tokenize-type (str)
+  "Tokenize DuckDB type string STR into a list of tokens.
+
+Tokens are strings: identifiers, numbers, and single punctuation
+characters from the set ( ) , [ ].
+
+Double-quoted identifiers are returned without quotes, with
+escaped double quotes (\"\" -> \") resolved.
+
+Return list of token strings.
+
+Called by `duckdb-query-parse-type'."
+  (let ((pos 0)
+        (len (length str))
+        (tokens nil))
+    (while (< pos len)
+      (let ((ch (aref str pos)))
+        (cond
+         ;; Whitespace
+         ((memq ch '(?\s ?\t ?\n ?\r))
+          (setq pos (1+ pos)))
+         ;; Punctuation
+         ((memq ch '(?\( ?\) ?, ?\[ ?\]))
+          (push (string ch) tokens)
+          (setq pos (1+ pos)))
+         ;; Quoted identifier
+         ((eq ch ?\")
+          (let ((end (1+ pos))
+                (chars nil)
+                (done nil))
+            (while (and (< end len) (not done))
+              (let ((c (aref str end)))
+                (cond
+                 ((and (eq c ?\")
+                       (< (1+ end) len)
+                       (eq (aref str (1+ end)) ?\"))
+                  (push ?\" chars)
+                  (setq end (+ end 2)))
+                 ((eq c ?\")
+                  (setq end (1+ end))
+                  (setq done t))
+                 (t
+                  (push c chars)
+                  (setq end (1+ end))))))
+            (push (apply #'string (nreverse chars)) tokens)
+            (setq pos end)))
+         ;; Identifier or number
+         (t
+          (let ((end pos))
+            (while (and (< end len)
+                        (let ((c (aref str end)))
+                          (or (and (>= c ?A) (<= c ?Z))
+                              (and (>= c ?a) (<= c ?z))
+                              (and (>= c ?0) (<= c ?9))
+                              (eq c ?_))))
+              (setq end (1+ end)))
+            (when (= end pos)
+              (error "Unexpected character %c at position %d in type: %s"
+                     ch pos str))
+            (push (substring str pos end) tokens)
+            (setq pos end))))))
+    (nreverse tokens)))
+
+(defun duckdb-query--parse-type-from-tokens (tokens)
+  "Parse one type from TOKENS, return (PARSED-TYPE . REMAINING-TOKENS).
+
+Dispatch on uppercase type name to STRUCT/UNION field parsing,
+MAP/LIST/ARRAY sub-type parsing, parameterized scalar parsing,
+or plain scalar symbol.
+
+Called by `duckdb-query-parse-type'.
+Recursively called for nested types."
+  (unless tokens
+    (error "Unexpected end of type tokens"))
+  (let* ((name (pop tokens))
+         (upper (upcase name)))
+    (cond
+     ;; STRUCT(field type, ...) or UNION(field type, ...)
+     ((and (member upper '("STRUCT" "UNION"))
+           (equal (car tokens) "("))
+      (pop tokens)
+      (let ((fields nil))
+        (while (not (equal (car tokens) ")"))
+          (unless tokens (error "Unclosed %s" upper))
+          (let* ((fname (pop tokens))
+                 (sub (duckdb-query--parse-type-from-tokens tokens))
+                 (ftype (car sub)))
+            (setq tokens (cdr sub))
+            (push (cons (intern fname) ftype) fields)
+            (when (equal (car tokens) ",")
+              (pop tokens))))
+        (pop tokens)
+        (duckdb-query--parse-type-suffixes
+         (cons (intern upper) (nreverse fields)) tokens)))
+
+     ;; MAP(key, value)
+     ((and (string= upper "MAP") (equal (car tokens) "("))
+      (pop tokens)
+      (let* ((k (duckdb-query--parse-type-from-tokens tokens))
+             (_ (progn (setq tokens (cdr k))
+                       (unless (equal (pop tokens) ",")
+                         (error "Expected ',' in MAP"))))
+             (v (duckdb-query--parse-type-from-tokens tokens)))
+        (setq tokens (cdr v))
+        (unless (equal (pop tokens) ")")
+          (error "Expected ')' closing MAP"))
+        (duckdb-query--parse-type-suffixes
+         (list 'MAP (car k) (car v)) tokens)))
+
+     ;; LIST(type)
+     ((and (string= upper "LIST") (equal (car tokens) "("))
+      (pop tokens)
+      (let ((inner (duckdb-query--parse-type-from-tokens tokens)))
+        (setq tokens (cdr inner))
+        (unless (equal (pop tokens) ")")
+          (error "Expected ')' closing LIST"))
+        (duckdb-query--parse-type-suffixes
+         (list 'LIST (car inner)) tokens)))
+
+     ;; ARRAY(type, N)
+     ((and (string= upper "ARRAY") (equal (car tokens) "("))
+      (pop tokens)
+      (let ((inner (duckdb-query--parse-type-from-tokens tokens)))
+        (setq tokens (cdr inner))
+        (unless (equal (pop tokens) ",")
+          (error "Expected ',' in ARRAY"))
+        (let ((n (string-to-number (pop tokens))))
+          (unless (equal (pop tokens) ")")
+            (error "Expected ')' closing ARRAY"))
+          (duckdb-query--parse-type-suffixes
+           (list 'ARRAY (car inner) n) tokens))))
+
+     ;; Parameterized scalar: DECIMAL(18,3), VARCHAR(255)
+     ((equal (car tokens) "(")
+      (pop tokens)
+      (let ((params nil))
+        (while (not (equal (car tokens) ")"))
+          (unless tokens (error "Unclosed parameter list"))
+          (push (string-to-number (pop tokens)) params)
+          (when (equal (car tokens) ",")
+            (pop tokens)))
+        (pop tokens)
+        (duckdb-query--parse-type-suffixes
+         (cons (intern upper) (nreverse params)) tokens)))
+
+     ;; Plain scalar
+     (t
+      (duckdb-query--parse-type-suffixes (intern upper) tokens)))))
+
+(defun duckdb-query--parse-type-suffixes (parsed tokens)
+  "Wrap PARSED with LIST or ARRAY for trailing [] or [N] in TOKENS.
+
+Return (FINAL-PARSED . REMAINING-TOKENS).
+
+Called after each type parse to handle suffix notation."
+  (while (equal (car tokens) "[")
+    (pop tokens)
+    (if (equal (car tokens) "]")
+        (progn (pop tokens)
+               (setq parsed (list 'LIST parsed)))
+      (let ((n (string-to-number (pop tokens))))
+        (unless (equal (pop tokens) "]")
+          (error "Expected ']'"))
+        (setq parsed (list 'ARRAY parsed n)))))
+  (cons parsed tokens))
+
+(defun duckdb-query-parse-type (type-string)
+  "Parse DuckDB TYPE-STRING into structured Elisp representation.
+
+TYPE-STRING is a DuckDB type string as returned by DESCRIBE or
+`duckdb-query-column-types'.
+
+Scalar types return as symbols.  Compound types return as lists:
+
+  \"INTEGER\"                   => INTEGER
+  \"DECIMAL(18,3)\"             => (DECIMAL 18 3)
+  \"VARCHAR[]\"                 => (LIST VARCHAR)
+  \"INTEGER[3]\"                => (ARRAY INTEGER 3)
+  \"STRUCT(x INT, y VARCHAR)\"  => (STRUCT (x . INT) (y . VARCHAR))
+  \"MAP(VARCHAR, INTEGER)\"     => (MAP VARCHAR INTEGER)
+  \"UNION(num INT, str TEXT)\"  => (UNION (num . INT) (str . TEXT))
+
+Nested types parse recursively.  Extension and user-defined types
+return as symbols.
+
+Signal error for malformed type strings.
+
+Uses `duckdb-query--tokenize-type' for lexing.
+Uses `duckdb-query--parse-type-from-tokens' for parsing.
+Also see `duckdb-query-column-types' with :format :parsed.
+Also see `duckdb-query-type-to-json' for JSON conversion."
+  (let* ((tokens (duckdb-query--tokenize-type type-string))
+         (result (duckdb-query--parse-type-from-tokens tokens)))
+    (when (cdr result)
+      (error "Trailing tokens in type string: %S" (cdr result)))
+    (car result)))
+
+(defun duckdb-query-type-to-json (parsed-type)
+  "Convert PARSED-TYPE to a JSON-serializable Elisp structure.
+
+PARSED-TYPE is the output of `duckdb-query-parse-type'.
+
+Scalar types become strings.  Compound types become alists with
+symbol keys suitable for `json-serialize':
+
+  INTEGER              => \"INTEGER\"
+  (DECIMAL 18 3)       => ((type . \"DECIMAL\") (params . [18 3]))
+  (LIST VARCHAR)       => ((type . \"LIST\") (element . \"VARCHAR\"))
+  (ARRAY INT 3)        => ((type . \"ARRAY\") (element . \"INT\") (size . 3))
+  (MAP K V)            => ((type . \"MAP\") (key . K) (value . V))
+  (STRUCT (f . T) ...) => ((type . \"STRUCT\") (fields . [field ...]))
+  (UNION (f . T) ...)  => ((type . \"UNION\") (fields . [field ...]))
+
+Each STRUCT/UNION field becomes ((name . \"f\") (type . ...)).
+
+Also see `duckdb-query-parse-type'.
+Also see `duckdb-query-column-types' with :format :json."
+  (cond
+   ((symbolp parsed-type)
+    (symbol-name parsed-type))
+   ((consp parsed-type)
+    (let ((kind (car parsed-type)))
+      (pcase kind
+        ((or 'STRUCT 'UNION)
+         `((type . ,(symbol-name kind))
+           (fields . ,(vconcat
+                       (mapcar
+                        (lambda (field)
+                          `((name . ,(symbol-name (car field)))
+                            (type . ,(duckdb-query-type-to-json
+                                      (cdr field)))))
+                        (cdr parsed-type))))))
+        ('LIST
+         `((type . "LIST")
+           (element . ,(duckdb-query-type-to-json (cadr parsed-type)))))
+        ('ARRAY
+         `((type . "ARRAY")
+           (element . ,(duckdb-query-type-to-json (cadr parsed-type)))
+           (size . ,(caddr parsed-type))))
+        ('MAP
+         `((type . "MAP")
+           (key . ,(duckdb-query-type-to-json (cadr parsed-type)))
+           (value . ,(duckdb-query-type-to-json (caddr parsed-type)))))
+        (_
+         `((type . ,(symbol-name kind))
+           (params . ,(vconcat (cdr parsed-type))))))))
+   (t (error "Unexpected parsed type: %S" parsed-type))))
+
 ;;;; Schema Introspection
 
 (defun duckdb-query-describe (source &rest args)
@@ -403,27 +653,73 @@ Also see `duckdb-query-column-types' for name-to-type mapping."
           (apply #'duckdb-query-describe source args)))
 
 (defun duckdb-query-column-types (source &rest args)
-  "Return alist mapping column names to DuckDB types for SOURCE.
+  "Return column name-to-type mapping for SOURCE.
 
 SOURCE can be table name, file path, URL, or SELECT query.
-ARGS are passed to `duckdb-query-describe'.
 
-Return alist of (NAME . TYPE) pairs where NAME is column name
-string and TYPE is DuckDB type string.
+ARGS are keyword arguments:
+  :format - Output format for type values (default :raw)
+
+FORMAT controls the representation of type values:
+
+  :raw     Alist of (NAME-STRING . TYPE-STRING) pairs.
+           Type strings are DuckDB's canonical text representation.
+           This is the default.
+
+  :parsed  Alist of (NAME-STRING . PARSED-TYPE) pairs.
+           Type strings are parsed into structured Elisp via
+           `duckdb-query-parse-type'.  Scalars become symbols,
+           compound types become nested lists.
+
+  :json    JSON string representing the full schema as a JSON
+           array of objects, each with \"name\" and \"type\" keys.
+           Uses `duckdb-query-type-to-json' and `json-serialize'.
+
+Other ARGS are passed to `duckdb-query-describe'.
 
 Example:
 
-  (duckdb-query-column-types \"users\")
-  ;; => ((\"id\" . \"INTEGER\")
-  ;;     (\"name\" . \"VARCHAR\")
-  ;;     (\"created_at\" . \"TIMESTAMP\"))
+  (duckdb-query-column-types \"SELECT 1 AS id, 'x' AS name\")
+  ;; => ((\"id\" . \"INTEGER\") (\"name\" . \"VARCHAR\"))
+
+  (duckdb-query-column-types
+   \"SELECT {'x': 1} AS pt\" :format :parsed)
+  ;; => ((\"pt\" . (STRUCT (x . INTEGER))))
+
+  (duckdb-query-column-types
+   \"SELECT 1 AS id\" :format :json)
+  ;; => \"[{\\\"name\\\":\\\"id\\\",\\\"type\\\":\\\"INTEGER\\\"}]\"
 
 Also see `duckdb-query-describe' for full column metadata.
-Also see `duckdb-query-columns' for just column names."
-  (mapcar (lambda (row)
-            (cons (cdr (assq 'column_name row))
-                  (cdr (assq 'column_type row))))
-          (apply #'duckdb-query-describe source args)))
+Also see `duckdb-query-columns' for just column names.
+Also see `duckdb-query-parse-type' for parsing individual types.
+Also see `duckdb-query-type-to-json' for JSON conversion."
+  (let* ((format (or (plist-get args :format) :raw))
+         (clean-args (cl-loop for (k v) on args by #'cddr
+                              unless (eq k :format)
+                              append (list k v)))
+         (raw (mapcar (lambda (row)
+                        (cons (cdr (assq 'column_name row))
+                              (cdr (assq 'column_type row))))
+                      (apply #'duckdb-query-describe source clean-args))))
+    (pcase format
+      (:raw raw)
+      (:parsed
+       (mapcar (lambda (pair)
+                 (cons (car pair)
+                       (duckdb-query-parse-type (cdr pair))))
+               raw))
+      (:json
+       (json-serialize
+        (vconcat
+         (mapcar (lambda (pair)
+                   `((name . ,(car pair))
+                     (type . ,(duckdb-query-type-to-json
+                               (duckdb-query-parse-type (cdr pair))))))
+                 raw))))
+      (_
+       (error "Unknown column-types format: %s.  Valid: :raw :parsed :json"
+              format)))))
 
 ;;;; Context Management Macro
 
