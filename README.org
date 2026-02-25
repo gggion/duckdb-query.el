@@ -210,12 +210,14 @@ dependencies, and fragment composition with embedded references, see
 - [[#parameterized-queries][Parameterized Queries]]
 - [[#output-formats][Output Formats]]
 - [[#schema-introspection][Schema Introspection]]
+- [[#type-parsing][Type Parsing]]
 - [[#database-persistence][Database Persistence]]
 - [[#session-based-execution][Session-Based Execution]]
 - [[#nested-types][Nested Types]]
 - [[#performance][Performance]]
 - [[#font-lock-for-reference-syntax][Font Lock for Reference Syntax]]
 - [[#sql-completion][SQL Completion]]
+- [[#structural-editing][Structural Editing]]
 - [[#acknowledgements][Acknowledgements]]
 - [[#related-packages][Related Packages]]
 - [[#integration][Integration]]
@@ -1028,6 +1030,106 @@ Discover structure before querying:
 ;;     ((column_name . "name") (column_type . "VARCHAR") (null . "YES") ...))
 #+end_src
 
+~duckdb-query-column-types~ accepts a ~:format~ parameter for structured output.
+See [[#type-parsing][Type Parsing]] for parsed and JSON formats.
+* Type Parsing
+:PROPERTIES:
+:CUSTOM_ID: type-parsing
+:END:
+#+begin_quote
+[!IMPORTANT]
+NEW in 0.8
+#+end_quote
+
+DuckDB's =DESCRIBE= output returns type information as strings. For scalar types
+like ="INTEGER"= this is sufficient, but complex nested types from extensions
+like =webbed= (XML reader) or =spatial= produce opaque strings hundreds of
+characters long. The type parser converts these into structured Elisp:
+
+#+begin_src elisp :results code
+(duckdb-query-parse-type "STRUCT(x INTEGER, y VARCHAR)")
+;; => (STRUCT (x . INTEGER) (y . VARCHAR))
+#+end_src
+
+#+begin_src elisp :results code
+(duckdb-query-parse-type "MAP(VARCHAR, INTEGER[])")
+;; => (MAP VARCHAR (LIST INTEGER))
+#+end_src
+
+#+begin_src elisp :results code
+(duckdb-query-parse-type "STRUCT(a STRUCT(b INTEGER, tags VARCHAR[]))")
+;; => (STRUCT (a . (STRUCT (b . INTEGER) (tags . (LIST VARCHAR)))))
+#+end_src
+
+The parser handles the full DuckDB type system: STRUCT, MAP, LIST, ARRAY, UNION,
+parameterized scalars like =DECIMAL(18,3)=, double-quoted field names, extension
+types, and user-defined types. The representation uses symbols for scalar types
+and nested lists for compound types, making it natural for ~pcase~, ~assq~, and
+recursive traversal.
+
+The ~duckdb-query-column-types~ function accepts a ~:format~ parameter to control
+type representation across an entire schema:
+
+#+begin_src elisp :results code
+;; Raw strings (default, backward compatible)
+(duckdb-query-column-types
+ "SELECT 1 AS id, {'x': 1, 'y': 2}::STRUCT(x INT, y INT) AS point")
+;; => (("id" . "INTEGER") ("point" . "STRUCT(x INTEGER, y INTEGER)"))
+#+end_src
+
+#+begin_src elisp :results code
+;; Parsed Elisp structures
+(duckdb-query-column-types
+ "SELECT 1 AS id, {'x': 1, 'y': 2}::STRUCT(x INT, y INT) AS point"
+ :format :parsed)
+;; => (("id" . INTEGER) ("point" . (STRUCT (x . INTEGER) (y . INTEGER))))
+#+end_src
+
+#+begin_src elisp :results code
+;; JSON schema string
+(duckdb-query-column-types
+ "SELECT 1 AS id, [1,2,3] AS arr"
+ :format :json)
+;; => "[{\"name\":\"id\",\"type\":\"INTEGER\"},{\"name\":\"arr\",\"type\":{\"type\":\"LIST\",\"element\":\"INTEGER\"}}]"
+#+end_src
+
+Individual parsed types can be converted to JSON-serializable structures with
+~duckdb-query-type-to-json~ for integration with external tools or APIs.
+
+The parsed representation enables programmatic schema exploration. For example,
+extracting all field names from a deeply nested STRUCT:
+
+#+begin_src elisp :results code
+(defun my-struct-fields (parsed)
+  "Recursively collect field names from PARSED type."
+  (when (and (listp parsed) (eq (car parsed) 'STRUCT))
+    (let ((fields (cdr parsed)))
+      (append (mapcar (lambda (f) (symbol-name (car f))) fields)
+              (cl-mapcan (lambda (f) (my-struct-fields (cdr f)))
+                         fields)))))
+
+(my-struct-fields
+ (duckdb-query-parse-type
+  "STRUCT(name VARCHAR, address STRUCT(city VARCHAR, zip INTEGER))"))
+;; => ("name" "address" "city" "zip")
+#+end_src
+
+Or pattern matching on column types:
+
+#+begin_src elisp :results code
+(let ((types (duckdb-query-column-types
+              "SELECT 1 AS id, [1,2] AS nums, {'x': 1} AS pt"
+              :format :parsed)))
+  (mapcar (lambda (col)
+            (cons (car col)
+                  (pcase (cdr col)
+                    (`(STRUCT . ,_) "struct")
+                    (`(LIST ,_) "list")
+                    (`(MAP ,_ ,_) "map")
+                    ((pred symbolp) "scalar"))))
+          types))
+;; => (("id" . "scalar") ("nums" . "list") ("pt" . "struct"))
+#+end_src
 * Database Persistence
 :PROPERTIES:
 :CUSTOM_ID: database-persistence
@@ -1518,6 +1620,140 @@ without querying DuckDB:
 These candidates sort above DuckDB metadata, so query-specific identifiers
 appear first. They carry their own category labels (=cte=, =alias=, =data=) for
 identification.
+* Structural Editing
+:PROPERTIES:
+:CUSTOM_ID: structural-editing
+:END:
+#+begin_quote
+[!IMPORTANT]
+NEW in 0.8: Extract, inline, and remove =@type:name= references structurally
+#+end_quote
+
+The =duckdb-query-edit.el= module provides bidirectional structural editing for
+=duckdb-query= forms. As queries grow complex, you progressively decompose
+monolithic SQL strings into composable fragments bound to =:val=, =:sql=, and
+=:data= parameters. The reverse operation supports simplification when references
+are no longer needed.
+
+All commands operate on the enclosing =duckdb-query= form detected via the
+structural parser. No configuration is required beyond loading the module.
+** Extracting to References
+# TODO: add videos to this
+
+Select a region inside a SQL string, then extract it into a named reference with
+the corresponding binding:
+
+#+begin_src elisp
+;; Starting form:
+(duckdb-query
+ "SELECT * FROM read_parquet('https://example.com/data.parquet')
+  WHERE month BETWEEN 6 AND 8")
+
+;; Select the URL, invoke M-x duckdb-query-edit-extract-to-val,
+;; name it "url":
+(duckdb-query
+ "SELECT * FROM read_parquet(@val:url)
+  WHERE month BETWEEN 6 AND 8"
+ :val '((url . "https://example.com/data.parquet")))
+
+;; Then select "month BETWEEN 6 AND 8",
+;; invoke M-x duckdb-query-edit-extract-to-sql, name it "filter":
+(duckdb-query
+ "SELECT * FROM read_parquet(@val:url)
+  WHERE @sql:filter"
+ :val '((url . "https://example.com/data.parquet"))
+ :sql '((filter . "month BETWEEN 6 AND 8")))
+#+end_src
+
+Three pre-typed convenience commands skip the type prompt:
+
+- ~duckdb-query-edit-extract-to-val~: Extract to =:val= parameter
+- ~duckdb-query-edit-extract-to-sql~: Extract to =:sql= parameter
+- ~duckdb-query-edit-extract-to-data~: Extract to =:data= parameter
+
+The general command ~duckdb-query-edit-extract-to-ref~ prompts for both reference
+type and name.
+
+Extraction works inside any string literal in the form, not just the main SQL
+string. This enables progressive decomposition where a fragment extracted from
+the main query can itself be further decomposed from its =:sql= binding value.
+
+** Inlining References
+
+Place point on any =@type:name= reference and invoke
+~duckdb-query-edit-inline-ref~ to replace it with the binding's literal value:
+
+#+begin_src elisp
+;; Point on @sql:filter, invoke M-x duckdb-query-edit-inline-ref:
+;; Before:
+(duckdb-query "SELECT * FROM t WHERE @sql:filter"
+              :sql '((filter . "age > 21")))
+
+;; After (binding preserved):
+(duckdb-query "SELECT * FROM t WHERE age > 21"
+              :sql '((filter . "age > 21")))
+
+;; With C-u prefix, binding is also removed:
+(duckdb-query "SELECT * FROM t WHERE age > 21")
+#+end_src
+
+Without prefix argument, the binding entry is preserved in the parameter alist.
+Orphaned bindings are visible via ~duckdb-query-font-lock-mode~, which highlights
+undefined references. With =C-u= prefix, the binding entry is also removed,
+completing the full round-trip.
+** Removing Bindings
+
+~duckdb-query-edit-remove-binding~ removes the binding entry for the reference at
+point without modifying the reference text. When other references to the same
+binding exist in the form, it prompts for confirmation showing the reference
+count:
+
+#+begin_src elisp
+;; Point on @val:threshold (used twice in the query):
+;; M-x duckdb-query-edit-remove-binding
+;; => "@val:threshold has 2 references; remove binding anyway?"
+#+end_src
+
+~duckdb-query-edit-remove-unused-bindings~ performs bulk cleanup, scanning all
+bindings in the enclosing form and removing those with zero references.
+
+** Value Formatting
+
+Extracted text is formatted appropriately for the target parameter type:
+
+| Target | Input (selected text) | Stored binding value     |
+|--------+-----------------------+--------------------------|
+| =:val=   | ='./data/users.csv'=    | ="./data/users.csv"=       |
+| =:val=   | =42=                    | =42= (numeric, not quoted) |
+| =:sql=   | =month BETWEEN 6 AND 8= | ="month BETWEEN 6 AND 8"=  |
+| =:data=  | (as-is)               | (for manual editing)     |
+
+For =:val=, surrounding SQL single-quotes are stripped because
+~duckdb-query--value-to-sql-literal~ re-adds them at execution time. Numeric
+strings pass through without quoting.
+** Indentation
+
+Post-edit indentation is controlled by ~duckdb-query-edit-indent-after-edit~,
+which defaults to =nil=. When non-nil, ~indent-region~ runs on the enclosing
+=duckdb-query= form after every structural modification. The default respects
+users who rely on ~aggressive-indent-mode~ or other formatting tools:
+
+#+begin_src elisp
+(setq duckdb-query-edit-indent-after-edit t)
+#+end_src
+
+** Command Summary
+
+| Command                                  | Trigger            | Behavior                             |
+|------------------------------------------+--------------------+--------------------------------------|
+| ~duckdb-query-edit-extract-to-ref~         | Region in string   | Prompt type and name, create binding |
+| ~duckdb-query-edit-extract-to-val~         | Region in string   | Create =:val= binding                  |
+| ~duckdb-query-edit-extract-to-sql~         | Region in string   | Create =:sql= binding                  |
+| ~duckdb-query-edit-extract-to-data~        | Region in string   | Create =:data= binding                 |
+| ~duckdb-query-edit-inline-ref~             | Point on reference | Replace ref with value text          |
+| =C-u= ~duckdb-query-edit-inline-ref~         | Point on reference | Replace ref and remove binding       |
+| ~duckdb-query-edit-remove-binding~         | Point on reference | Remove binding, keep reference       |
+| ~duckdb-query-edit-remove-unused-bindings~ | Anywhere in form   | Remove all zero-reference bindings   |
 * Acknowledgements
 :PROPERTIES:
 :CUSTOM_ID: acknowledgements
