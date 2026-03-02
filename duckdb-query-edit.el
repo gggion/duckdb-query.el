@@ -432,8 +432,9 @@ branches."
 TEXT is the raw Elisp literal as extracted from the buffer.
 
 For :sql, strip surrounding double quotes to get raw SQL.
-For :val, strip surrounding double quotes for strings, or
-return numeric text as-is.
+For :val, strip surrounding double quotes for strings and
+re-wrap with SQL single quotes to restore the literal form
+that DuckDB expects.  Numeric text is returned as-is.
 For :data, return as-is.
 
 Return string suitable for insertion into a SQL string.
@@ -441,7 +442,21 @@ Return string suitable for insertion into a SQL string.
 Uses `duckdb-query-edit--strip-elisp-string-quotes' for
 double-quote stripping."
   (pcase ref-type
-    ((or :sql :val) (duckdb-query-edit--strip-elisp-string-quotes text))
+    (:sql (duckdb-query-edit--strip-elisp-string-quotes text))
+    (:val
+     (let ((stripped (duckdb-query-edit--strip-elisp-string-quotes text)))
+       (cond
+        ;; Numeric literal - no quotes needed
+        ((string-match-p "\\`-?[0-9]*\\.?[0-9]+\\'" stripped)
+         stripped)
+        ;; Already has SQL single quotes (defensive)
+        ((and (>= (length stripped) 2)
+              (eq (aref stripped 0) ?')
+              (eq (aref stripped (1- (length stripped))) ?'))
+         stripped)
+        ;; String value - restore SQL single quotes
+        (t
+         (format "'%s'" stripped)))))
     (_ text)))
 
 ;;;; Internal: Remove Binding
