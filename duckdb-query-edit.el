@@ -494,14 +494,14 @@ Delete from keyword start to value end, including leading
 whitespace on the same line."
   (let ((key-beg (plist-get param :key-beg))
         (val-end (plist-get param :val-end)))
-    ;; Extend backward to consume leading whitespace and newline
     (save-excursion
       (goto-char key-beg)
       (let ((line-start (line-beginning-position)))
         (skip-chars-backward " \t" line-start)
         (when (eq (char-before) ?\n)
           (setq key-beg (1- (point)))))
-      (delete-region key-beg val-end))))
+      (delete-region key-beg val-end)
+      (syntax-ppss-flush-cache key-beg))))
 
 (defun duckdb-query-edit--remove-entry (target _entries)
   "Remove TARGET entry from parameter alist.
@@ -524,11 +524,12 @@ only the entry text."
         (skip-chars-forward " \t")
         (let ((after-is-eol (or (eolp) (eobp))))
           (if (and before-is-blank after-is-eol)
-              ;; Entry owns the line: delete line including newline
-              (delete-region line-start
-                             (min (1+ (line-end-position)) (point-max)))
-            ;; Entry shares a line: delete just the entry
-            (delete-region entry-beg entry-end)))))))
+              (let ((del-beg line-start)
+                    (del-end (min (1+ (line-end-position)) (point-max))))
+                (delete-region del-beg del-end)
+                (syntax-ppss-flush-cache del-beg))
+            (delete-region entry-beg entry-end)
+            (syntax-ppss-flush-cache entry-beg)))))))
 
 ;;;; Internal: Reference Count Check
 
