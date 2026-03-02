@@ -118,6 +118,11 @@ KEYWORD is :val, :sql, or :data.
 NAME is binding name as string.
 VALUE is binding value as string (Elisp literal representation).
 
+If a binding with NAME already exists in KEYWORD parameter,
+prompt to replace it.  On confirmation, replace the value in
+place, preserving the parameter's position in the form.  On
+refusal, signal `user-error'.
+
 If KEYWORD parameter exists, append (NAME . VALUE) to its alist.
 If KEYWORD parameter does not exist, insert it before the closing
 parenthesis of the form.
@@ -129,11 +134,30 @@ For :data, VALUE is an Elisp data expression.
 Return position after inserted text.
 
 Caller is responsible for proper VALUE formatting.
-Uses `duckdb-query-edit--find-param' for parameter location."
-  (let ((param (duckdb-query-edit--find-param form-beg form-end keyword)))
-    (if param
-        (duckdb-query-edit--append-to-param param name value)
-      (duckdb-query-edit--insert-new-param form-end keyword name value))))
+Uses `duckdb-query-edit--find-param' for parameter location.
+Uses `duckdb-query-edit--replace-binding-value' for in-place replacement."
+  ;; NOTE 2025-07-02: Duplicate check is inlined here.  Extract into
+  ;; utility function if needed elsewhere in the future.
+  (let ((replaced nil)
+        (existing-param (duckdb-query-edit--find-param
+                         form-beg form-end keyword)))
+    (when (and existing-param
+               (memq (intern name)
+                     (duckdb-query--extract-binding-names
+                      (plist-get existing-param :val-beg)
+                      (plist-get existing-param :val-end))))
+      (let ((type-str (substring (symbol-name keyword) 1)))
+        (unless (y-or-n-p (format "@%s:%s already bound; replace? "
+                                  type-str name))
+          (user-error "Binding @%s:%s already exists" type-str name))
+        (duckdb-query-edit--replace-binding-value
+         form-beg form-end keyword name value)
+        (setq replaced t)))
+    (unless replaced
+      (let ((param (duckdb-query-edit--find-param form-beg form-end keyword)))
+        (if param
+            (duckdb-query-edit--append-to-param param name value)
+          (duckdb-query-edit--insert-new-param form-end keyword name value))))))
 
 (defun duckdb-query-edit--find-last-binding-end (val-beg val-end)
   "Find position after last binding entry in alist between VAL-BEG and VAL-END.
@@ -530,6 +554,71 @@ only the entry text."
                 (syntax-ppss-flush-cache del-beg))
             (delete-region entry-beg entry-end)
             (syntax-ppss-flush-cache entry-beg)))))))
+
+;;;; Internal: Replace binding
+(defun duckdb-query-edit--replace-binding-value (form-beg form-end keyword name value)
+  "Replace value of binding NAME in KEYWORD parameter with VALUE.
+
+FORM-BEG and FORM-END delimit the `duckdb-query' form.
+KEYWORD is :val, :sql, or :data.
+NAME is binding name as string.
+VALUE is new Elisp literal string.
+
+Navigate to the cons cell (NAME . OLD-VALUE) and replace OLD-VALUE
+with VALUE, preserving the binding's position in the alist.
+
+Return non-nil if replacement succeeded, nil if binding not found.
+
+Uses `duckdb-query-edit--find-param' for parameter location.
+Called by `duckdb-query-edit--insert-binding' for duplicate replacement."
+  (let ((param (duckdb-query-edit--find-param form-beg form-end keyword)))
+    (when param
+      (save-excursion
+        (goto-char (plist-get param :val-beg))
+        ;; Skip quote/backquote
+        (when (memq (char-after) '(?' ?`))
+          (forward-char 1))
+        (when (eq (char-after) ?\()
+          (let ((list-end (save-excursion
+                            (when (duckdb-query--forward-sexp-safe)
+                              (1- (point))))))
+            (when list-end
+              (forward-char 1)
+              (catch 'replaced
+                (while (< (point) list-end)
+                  (duckdb-query--skip-whitespace-and-comments)
+                  ;; Skip unquote markers
+                  (when (eq (char-after) ?,)
+                    (forward-char 1)
+                    (when (eq (char-after) ?@)
+                      (forward-char 1)))
+                  (duckdb-query--skip-whitespace-and-comments)
+                  (when (and (< (point) list-end)
+                             (eq (char-after) ?\())
+                    (let ((entry-start (point)))
+                      (forward-char 1)
+                      (duckdb-query--skip-whitespace-and-comments)
+                      (when (looking-at (concat (regexp-quote name) "\\_>"))
+                        (goto-char (match-end 0))
+                        (duckdb-query--skip-whitespace-and-comments)
+                        (when (eq (char-after) ?\.)
+                          (forward-char 1)
+                          (duckdb-query--skip-whitespace-and-comments)
+                          ;; Now at old value start
+                          (let ((val-start (point)))
+                            (goto-char entry-start)
+                            (duckdb-query--forward-sexp-safe)
+                            ;; Delete old value (between val-start and closing paren)
+                            (let ((entry-end (1- (point))))
+                              (delete-region val-start entry-end)
+                              (goto-char val-start)
+                              (insert value)
+                              (syntax-ppss-flush-cache val-start))
+                            (throw 'replaced t))))
+                      ;; Not this entry, skip it
+                      (goto-char entry-start)
+                      (unless (duckdb-query--forward-sexp-safe)
+                        (forward-char 1)))))))))))))
 
 ;;;; Internal: Reference Count Check
 
