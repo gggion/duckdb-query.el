@@ -651,6 +651,8 @@ Also see `duckdb-query-edit-extract-to-sql' for pre-typed variant."
              (marker-position beg-marker)
              (marker-position end-marker)
              ref-type name)
+            ;; Flush stale parse cache from buffer modifications
+            (syntax-ppss-flush-cache (marker-position form-beg-marker))
             ;; Re-indent the form IF enabled
             (duckdb-query-edit--indent-form form-beg-marker))
         ;; Clean up markers
@@ -776,6 +778,8 @@ Also see `duckdb-query-edit-remove-binding'."
                    (marker-position form-beg-marker)
                    (marker-position form-end-marker)
                    ref-type ref-name))
+                ;; Flush stale parse cache from buffer modifications
+                (syntax-ppss-flush-cache (marker-position form-beg-marker))
                 ;; Re-indent IF the setting is enabled
                 (duckdb-query-edit--indent-form form-beg-marker))
             (set-marker form-beg-marker nil)
@@ -831,7 +835,8 @@ all orphaned bindings."
                          form-beg form-end ref-type ref-name)
                   (user-error "No binding for %s in %s parameter"
                               ref-name (symbol-name ref-type)))
-
+                ;; Flush stale parse cache from buffer modifications
+                (syntax-ppss-flush-cache (marker-position form-beg-marker))
                 ;; Re-indent IF the setting is enabled
                 (duckdb-query-edit--indent-form form-beg-marker)
                 (message "Removed %s:%s binding"
